@@ -167,6 +167,14 @@ public final class BookCycle implements ClientModInitializer {
     private ItemStack eatingStack = ItemStack.EMPTY;
     private long lastFailedMeal;
 
+    private int tickCounter;
+    private int cycleStartTick;
+    private long cycleStartNanos;
+    private String currentPhase;
+    private int phaseStartTick;
+    private final java.util.Map<String, Integer> currentPhaseTicks = new java.util.LinkedHashMap<>();
+    private final java.util.List<Integer> recentCycleTicks = new java.util.ArrayList<>();
+
     @Override
     public void onInitializeClient() {
         KeyMapping cycle = KeyMappingHelper.registerKeyMapping(new KeyMapping(
@@ -308,9 +316,12 @@ public final class BookCycle implements ClientModInitializer {
                 xpNeeded = 1;
                 completedAtLastSwing = 0;
                 hasSwung = false;
-                if (open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE)) {
-                    message(current, withGuardians ? "guardian_started" : "started");
-                }
+                tickCounter = 0;
+                recentCycleTicks.clear();
+                currentPhaseTicks.clear();
+                currentPhase = null;
+                startNextCycle(client);
+                message(current, withGuardians ? "guardian_started" : "started");
                 return;
             }
         }
@@ -318,6 +329,7 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private void tick(Minecraft client) {
+        tickCounter++;
         if (player != client.player || !player.isAlive() || client.gameMode == null) {
             reset();
             return;
@@ -432,6 +444,7 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         tableBook = player.getInventory().getItem(bookSlot).copy();
+        recordPhase("PUT_BOOK");
         putBookOnTable(client, menu);
         lapisMoveState = -1;
         advance(Step.ENCHANT);
@@ -686,6 +699,7 @@ public final class BookCycle implements ClientModInitializer {
         enchantSeed = menu.getEnchantmentSeed();
         lapisBeforeEnchant = menu.getSlot(TABLE_LAPIS).getItem().copy();
         retriedEnchant = false;
+        recordPhase("ENCHANT");
         pressEnchant(client, menu);
         advance(Step.TAKE_ENCHANTED);
     }
@@ -698,7 +712,11 @@ public final class BookCycle implements ClientModInitializer {
             stop("reach");
             return;
         }
-        recoverBook(client, menu, TABLE_BOOK, () -> open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE));
+        recordPhase("TAKE_ENCHANTED");
+        recoverBook(client, menu, TABLE_BOOK, () -> {
+            recordPhase("OPEN_GRINDSTONE");
+            open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE);
+        });
     }
 
     private void retryEnchant(Minecraft client, EnchantmentMenu menu) {
@@ -811,6 +829,7 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         activeMenu = menu;
+        recordPhase("PUT_GRIND_BOOK");
         swap(client, menu, GrindstoneMenu.INPUT_SLOT);
         advance(Step.GRIND);
     }
@@ -831,10 +850,26 @@ public final class BookCycle implements ClientModInitializer {
             stop("reach");
             return;
         }
-        recoverBook(client, menu, GrindstoneMenu.RESULT_SLOT, () -> {
-            recoveringBook = true;
-            open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
-        });
+        recordPhase("TAKE_RESULT");
+        recoverBook(client, menu, GrindstoneMenu.RESULT_SLOT, () -> completeCycle(client));
+    }
+
+    private void completeCycle(Minecraft client) {
+        completed++;
+        recoveryAttempts = 0;
+        recoveringBook = false;
+        finishCycleMetrics();
+        closeMenu();
+
+        if (guardianMode && (completed - completedAtLastSwing >= CYCLES_PER_SWING)) {
+            recordPhase("SWING");
+            if (aimIfDue(client)) {
+                return;
+            }
+            step = Step.WAIT_FOR_XP;
+            return;
+        }
+        startNextCycle(client);
     }
 
     private void waitForXp(int required, String reason, Object... args) {
@@ -872,6 +907,7 @@ public final class BookCycle implements ClientModInitializer {
                 completedAtLastSwing = completed;
                 lastSwingAt = System.nanoTime();
                 hasSwung = true;
+                recordPhase("WAIT_FOR_XP");
             }
             aimedGuardian = null;
             step = Step.WAIT_FOR_XP;
@@ -880,7 +916,7 @@ public final class BookCycle implements ClientModInitializer {
         }
         if (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded) {
             xpNeeded = 1;
-            open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+            startNextCycle(client);
         }
     }
 
@@ -1415,6 +1451,71 @@ public final class BookCycle implements ClientModInitializer {
         pickedIngredient = ItemStack.EMPTY;
         step = null;
         player = null;
+        tickCounter = 0;
+        cycleStartTick = 0;
+        cycleStartNanos = 0;
+        currentPhase = null;
+        phaseStartTick = 0;
+        currentPhaseTicks.clear();
+        recentCycleTicks.clear();
+    }
+
+    private void recordPhase(String newPhase) {
+        if (currentPhase != null) {
+            int elapsed = tickCounter - phaseStartTick;
+            currentPhaseTicks.merge(currentPhase, Math.max(0, elapsed), Integer::sum);
+        }
+        currentPhase = newPhase;
+        phaseStartTick = tickCounter;
+    }
+
+    private void finishCycleMetrics() {
+        if (currentPhase != null) {
+            int elapsed = tickCounter - phaseStartTick;
+            currentPhaseTicks.merge(currentPhase, Math.max(0, elapsed), Integer::sum);
+            currentPhase = null;
+        }
+        int totalTicks = Math.max(1, tickCounter - cycleStartTick);
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(Math.max(0, System.nanoTime() - cycleStartNanos));
+        recentCycleTicks.add(totalTicks);
+
+        StringBuilder details = new StringBuilder();
+        currentPhaseTicks.forEach((phase, ticks) -> {
+            if (!details.isEmpty()) details.append(", ");
+            details.append(phase).append("=").append(ticks).append("t");
+        });
+        LOGGER.info("[BookCycle Perf] Cycle #{} took {}t ({}ms): {}",
+                completed, totalTicks, durationMs, details);
+
+        if (recentCycleTicks.size() % 50 == 0) {
+            logSummaryPerf();
+        }
+        currentPhaseTicks.clear();
+    }
+
+    private void logSummaryPerf() {
+        if (recentCycleTicks.isEmpty()) return;
+        var sorted = new java.util.ArrayList<>(recentCycleTicks);
+        java.util.Collections.sort(sorted);
+        int count = sorted.size();
+        int min = sorted.getFirst();
+        int max = sorted.getLast();
+        int p95 = sorted.get(Math.min(count - 1, (int) Math.ceil(count * 0.95) - 1));
+        double avgTicks = sorted.stream().mapToInt(Integer::intValue).average().orElse(0.0);
+        double avgMs = avgTicks * 50.0;
+        double rate = avgTicks > 0 ? (1200.0 / avgTicks) : 0;
+        LOGGER.info(String.format(java.util.Locale.ROOT,
+                "[BookCycle Perf Summary] Cycles %d-%d: avg=%.1ft (%.0fms), min=%dt, max=%dt, p95=%dt, rate=%.1f cycles/min",
+                Math.max(1, count - 49), count, avgTicks, avgMs, min, max, p95, rate));
+    }
+
+    private void startNextCycle(Minecraft client) {
+        cycleStartTick = tickCounter;
+        cycleStartNanos = System.nanoTime();
+        currentPhaseTicks.clear();
+        currentPhase = null;
+        recordPhase("OPEN_TABLE");
+        open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
     }
 
     private static void message(LocalPlayer target, String key) {
