@@ -84,13 +84,16 @@ public final class BookCycle implements ClientModInitializer {
     private static final int RECOVERY_DELAY_TICKS = 20;
     private static final int MAX_RECOVERY_ATTEMPTS = 3;
     private static final int ENCHANT_RETRY_TICKS = 20;
+    private static final int LOW_FREE_SLOTS = 4;
+    private static final int LOOT_CRAFT_RETRY_TICKS = 20;
+    private static final int XP_WAIT_WARN_TICKS = 200;
     private static final int TABLE_BOOK = 0;
     private static final int TABLE_LAPIS = 1;
     private static final int FIRST_OFFER = 0;
     private static final double[] AIM_FRACTIONS = {0.5, 0.08, 0.92};
     private static final int CYCLES_PER_SWING = 2;
     private static final long EAT_RETRY_DELAY = TimeUnit.SECONDS.toNanos(5);
-    private static final long XP_SWING_COOLDOWN = TimeUnit.SECONDS.toNanos(30);
+    private static final long XP_SWING_COOLDOWN = TimeUnit.SECONDS.toNanos(2);
     private static final List<String> ROMAN_TIERS = List.of("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX");
     private static final Pattern COMPRESSED_LAPIS = Pattern.compile(
             "(?:多重)?圧縮ラピスラズリブロック\\s+([IVX]+)(?:\\s*\\([0-9,]+個分\\))?");
@@ -156,6 +159,9 @@ public final class BookCycle implements ClientModInitializer {
     private LootRecipe lootRecipe;
     private boolean takingLootResult;
     private boolean skipLootCrafting;
+    private int lootCraftRetryAtTick;
+    private boolean lootCleanupOnly;
+    private int xpWaitTicks;
     private ItemStack pickedIngredient = ItemStack.EMPTY;
     private int ingredientSource;
     private boolean warnedNoCraftingTable;
@@ -311,6 +317,9 @@ public final class BookCycle implements ClientModInitializer {
                 recoveryAttempts = 0;
                 recoveringBook = false;
                 skipLootCrafting = false;
+                lootCraftRetryAtTick = 0;
+                lootCleanupOnly = false;
+                xpWaitTicks = 0;
                 warnedNoCraftingTable = false;
                 guardianMode = withGuardians;
                 xpNeeded = 1;
@@ -358,6 +367,8 @@ public final class BookCycle implements ClientModInitializer {
                 skipLootCrafting(client, (CraftingMenu) activeMenu);
             } else if (step == Step.OPEN_CRAFTING_TABLE && client.gui.screen() == null) {
                 skipLootCrafting = true;
+                lootCraftRetryAtTick = tickCounter + LOOT_CRAFT_RETRY_TICKS;
+                lootCleanupOnly = false;
                 message(player, "loot_craft_skipped");
                 open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
             } else if (!recoverAfterTimeout(client)) {
@@ -438,9 +449,13 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         if (guardianMode && aimIfDue(client)) return;
-        if (!player.hasInfiniteMaterials()
-                && findItem(menu, Items.LAPIS_LAZULI, TABLE_LAPIS + 1, menu.slots.size()) < 0) {
-            sortLoot(client, menu);
+        boolean needsLapis = !player.hasInfiniteMaterials()
+                && findItem(menu, Items.LAPIS_LAZULI, TABLE_LAPIS + 1, menu.slots.size()) < 0;
+        int freeSlots = freeInventorySlots();
+        boolean inventoryPressure = freeSlots <= LOW_FREE_SLOTS && hasCleanupCandidate(menu);
+        boolean emergencyPressure = freeSlots == 0 && hasEmergencyGuardianLoot(menu);
+        if (needsLapis || inventoryPressure || emergencyPressure) {
+            sortLoot(client, menu, needsLapis);
             return;
         }
         tableBook = player.getInventory().getItem(bookSlot).copy();
@@ -523,7 +538,11 @@ public final class BookCycle implements ClientModInitializer {
         return best;
     }
 
-    private void sortLoot(Minecraft client, EnchantmentMenu menu) {
+    private void sortLoot(Minecraft client, EnchantmentMenu menu, boolean needsLapis) {
+        if (skipLootCrafting && tickCounter >= lootCraftRetryAtTick) {
+            skipLootCrafting = false;
+        }
+
         int keepFish = -1;
         for (int index = TABLE_LAPIS + 1; index < menu.slots.size(); index++) {
             ItemStack stack = menu.getSlot(index).getItem();
@@ -543,6 +562,7 @@ public final class BookCycle implements ClientModInitializer {
         if (!skipLootCrafting && nextLootRecipe() != null) {
             BlockPos craftingTable = nearestVisible(client, Blocks.CRAFTING_TABLE);
             if (craftingTable != null) {
+                lootCleanupOnly = !needsLapis;
                 open(client, Step.OPEN_CRAFTING_TABLE, craftingTable, Blocks.CRAFTING_TABLE);
                 return;
             }
@@ -551,7 +571,66 @@ public final class BookCycle implements ClientModInitializer {
                 warnedNoCraftingTable = true;
             }
         }
-        restockLapis(client, menu, TABLE_LAPIS + 1);
+
+        if (freeInventorySlots() == 0 && throwEmergencyGuardianLoot(client, menu)) {
+            return;
+        }
+
+        if (needsLapis) {
+            restockLapis(client, menu, TABLE_LAPIS + 1);
+        }
+    }
+
+    private int freeInventorySlots() {
+        int free = 0;
+        for (ItemStack stack : player.getInventory().getNonEquipmentItems()) {
+            if (stack.isEmpty()) free++;
+        }
+        return free;
+    }
+
+    private boolean hasCleanupCandidate(EnchantmentMenu menu) {
+        int keepFish = -1;
+        for (int index = TABLE_LAPIS + 1; index < menu.slots.size(); index++) {
+            ItemStack stack = menu.getSlot(index).getItem();
+            if (FISH.contains(stack.getItem()) && safeFood(stack)
+                    && (keepFish < 0 || stack.getCount() > menu.getSlot(keepFish).getItem().getCount())) {
+                keepFish = index;
+            }
+        }
+        for (int index = TABLE_LAPIS + 1; index < menu.slots.size(); index++) {
+            ItemStack stack = menu.getSlot(index).getItem();
+            if (!stack.isEmpty() && stack.getComponentsPatch().isEmpty()
+                    && (stack.is(Items.SEA_LANTERN) || (index != keepFish && FISH.contains(stack.getItem())))) {
+                return true;
+            }
+        }
+        return (!skipLootCrafting || tickCounter >= lootCraftRetryAtTick) && nextLootRecipe() != null;
+    }
+
+    private boolean hasEmergencyGuardianLoot(EnchantmentMenu menu) {
+        for (int index = TABLE_LAPIS + 1; index < menu.slots.size(); index++) {
+            ItemStack stack = menu.getSlot(index).getItem();
+            if (!stack.isEmpty() && stack.getComponentsPatch().isEmpty()
+                    && (stack.is(SHARD) || stack.is(CRYSTALS) || stack.is(PRISMARINE))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean throwEmergencyGuardianLoot(Minecraft client, EnchantmentMenu menu) {
+        for (int index = TABLE_LAPIS + 1; index < menu.slots.size(); index++) {
+            ItemStack stack = menu.getSlot(index).getItem();
+            if (stack.isEmpty() || !stack.getComponentsPatch().isEmpty()) continue;
+            if (stack.is(SHARD) || stack.is(CRYSTALS) || stack.is(PRISMARINE)) {
+                LOGGER.warn("Book Cycle is discarding {} x{} to recover from a full inventory",
+                        stack.getHoverName().getString(), stack.getCount());
+                click(client, menu, index, 1, ContainerInput.THROW);
+                return true;
+            }
+        }
+        return false;
     }
 
     private void restockLapis(Minecraft client, AbstractContainerMenu menu, int start) {
@@ -604,7 +683,12 @@ public final class BookCycle implements ClientModInitializer {
             if (!result.isEmpty()) return;
             lootRecipe = nextLootRecipe();
             if (lootRecipe == null) {
-                restockLapis(client, menu, inventoryStart);
+                if (lootCleanupOnly) {
+                    lootCleanupOnly = false;
+                    open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+                } else {
+                    restockLapis(client, menu, inventoryStart);
+                }
                 return;
             }
             RecipeDisplayId recipeId = findLootRecipe(client, lootRecipe);
@@ -675,9 +759,16 @@ public final class BookCycle implements ClientModInitializer {
 
     private void skipLootCrafting(Minecraft client, CraftingMenu menu) {
         skipLootCrafting = true;
-        LOGGER.info("Book Cycle skipped loot crafting during {}", step);
+        lootCraftRetryAtTick = tickCounter + LOOT_CRAFT_RETRY_TICKS;
+        LOGGER.info("Book Cycle skipped loot crafting during {}; retrying in {} ticks",
+                step, LOOT_CRAFT_RETRY_TICKS);
         message(player, "loot_craft_skipped");
-        restockLapis(client, menu, menu.getInputGridSlots().size() + 1);
+        if (lootCleanupOnly) {
+            lootCleanupOnly = false;
+            open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+        } else {
+            restockLapis(client, menu, menu.getInputGridSlots().size() + 1);
+        }
     }
 
     private void enchant(Minecraft client, EnchantmentMenu menu) {
@@ -883,6 +974,7 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         xpNeeded = required;
+        xpWaitTicks = 0;
         closeMenu();
         step = Step.WAIT_FOR_XP;
         message(player, "waiting_xp");
@@ -893,7 +985,14 @@ public final class BookCycle implements ClientModInitializer {
             stop("stopped");
             return;
         }
-        if (step == Step.WAIT_FOR_XP && tryEat(client)) return;
+        if (step == Step.WAIT_FOR_XP) {
+            xpWaitTicks++;
+            if (player.experienceLevel < xpNeeded && xpWaitTicks % XP_WAIT_WARN_TICKS == 0) {
+                LOGGER.warn("Book Cycle has waited {} ticks for XP (level {}, required {})",
+                        xpWaitTicks, player.experienceLevel, xpNeeded);
+            }
+            if (tryEat(client)) return;
+        }
         if (!player.getMainHandItem().is(ItemTags.SWORDS)) {
             stop("sword");
             return;
@@ -916,6 +1015,7 @@ public final class BookCycle implements ClientModInitializer {
         }
         if (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded) {
             xpNeeded = 1;
+            xpWaitTicks = 0;
             startNextCycle(client);
         }
     }
@@ -1449,6 +1549,10 @@ public final class BookCycle implements ClientModInitializer {
         aimedGuardian = null;
         lootRecipe = null;
         pickedIngredient = ItemStack.EMPTY;
+        skipLootCrafting = false;
+        lootCraftRetryAtTick = 0;
+        lootCleanupOnly = false;
+        xpWaitTicks = 0;
         step = null;
         player = null;
         tickCounter = 0;
