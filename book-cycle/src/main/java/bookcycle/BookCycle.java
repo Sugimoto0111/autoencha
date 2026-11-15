@@ -415,6 +415,21 @@ public final class BookCycle implements ClientModInitializer {
         }
         EnchantmentMenu menu = screen.getMenu();
         if (!waitForContents(menu)) return;
+        activeMenu = menu;
+
+        ItemStack heldBook = player.getInventory().getItem(bookSlot);
+        if (heldBook.is(Items.ENCHANTED_BOOK) && heldBook.getCount() == 1) {
+            if (menu.getSlot(TABLE_BOOK).hasItem()) {
+                stop("changed");
+                return;
+            }
+            LOGGER.warn("Book Cycle found the enchanted book already recovered while the enchanting table was open; resuming at the grindstone");
+            recoveringBook = false;
+            recordPhase("OPEN_GRINDSTONE");
+            open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE);
+            return;
+        }
+
         if (recoveringBook && isSingleBook()) {
             completed++;
             recoveryAttempts = 0;
@@ -425,7 +440,6 @@ public final class BookCycle implements ClientModInitializer {
             stop("changed");
             return;
         }
-        activeMenu = menu;
         if (!expectedSupply.isEmpty()) {
             int received = countMatching(menu, expectedSupply, TABLE_LAPIS + 1, menu.slots.size()) - countBeforeCraft;
             if (received != expectedSupply.getCount()) {
