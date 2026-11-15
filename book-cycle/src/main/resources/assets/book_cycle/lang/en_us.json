@@ -1,6 +1,6 @@
 {
   "key.book_cycle.control": "Cycle Book Enchantments",
-  "key.book_cycle.guardian": "Cycle Book Enchantments (Auto-Attack Guardians)",
+  "key.book_cycle.guardian": "Cycle Level-30 Book Enchantments (Auto-Attack XP Mobs)",
   "key.book_cycle.controls": "Open Book Cycle Controls",
   "book_cycle.delay": "Extra delay (0–20 ticks)",
   "book_cycle.attack_delay": "After attack (0–40 ticks)",
@@ -12,9 +12,9 @@
   "book_cycle.stance": "Stand up and exit spectator mode or free camera before starting.",
   "book_cycle.book": "Put exactly one regular book in a hotbar slot.",
   "book_cycle.started": "Book cycle started. Press Esc to stop.",
-  "book_cycle.guardian_started": "Attacks a guardian every two cycles. Press Esc to stop.",
-  "book_cycle.sword": "Hold a sword in your main hand to attack guardians.",
-  "book_cycle.waiting_xp": "Waiting for enough experience to continue.",
+  "book_cycle.guardian_started": "Uses the level-30 offer and refills XP from guardians or silverfish below level 30. Press Esc to stop.",
+  "book_cycle.sword": "Hold a sword in your main hand to attack XP mobs.",
+  "book_cycle.waiting_xp": "Refilling experience to level 30.",
   "book_cycle.finished": "Book cycle stopped (%s completed). %s",
   "book_cycle.stopped": "Cancelled.",
   "book_cycle.changed": "The screen or inventory changed.",
@@ -33,6 +33,7 @@
   "book_cycle.loot_crafting_table": "Shards and crystals will be held until a crafting table is within reach.",
   "book_cycle.loot_craft_skipped": "Loot crafting was unavailable. Keeping the materials and resupplying lapis.",
   "book_cycle.xp": "At least one experience level is required.",
-  "book_cycle.xp_offer": "The first offer requires experience level %s.",
+  "book_cycle.xp_offer": "The level-30 offer requires experience level %s.",
+  "book_cycle.bookshelves": "The third offer is not level 30 (currently %s). Check the 15-bookshelf setup.",
   "book_cycle.result": "The grindstone result is not a regular book."
 }

@@ -36,7 +36,9 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityTypes;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.monster.Guardian;
+import net.minecraft.world.entity.monster.Silverfish;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
@@ -89,11 +91,11 @@ public final class BookCycle implements ClientModInitializer {
     private static final int XP_WAIT_WARN_TICKS = 200;
     private static final int TABLE_BOOK = 0;
     private static final int TABLE_LAPIS = 1;
-    private static final int FIRST_OFFER = 0;
+    private static final int TARGET_OFFER = 2;
+    private static final int TARGET_LEVEL = 30;
+    private static final int TARGET_LAPIS = TARGET_OFFER + 1;
     private static final double[] AIM_FRACTIONS = {0.5, 0.08, 0.92};
-    private static final int CYCLES_PER_SWING = 2;
     private static final long EAT_RETRY_DELAY = TimeUnit.SECONDS.toNanos(5);
-    private static final long XP_SWING_COOLDOWN = TimeUnit.SECONDS.toNanos(2);
     private static final List<String> ROMAN_TIERS = List.of("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX");
     private static final Pattern COMPRESSED_LAPIS = Pattern.compile(
             "(?:多重)?圧縮ラピスラズリブロック\\s+([IVX]+)(?:\\s*\\([0-9,]+個分\\))?");
@@ -148,11 +150,8 @@ public final class BookCycle implements ClientModInitializer {
     private int completed;
     private boolean recoveringBook;
     private boolean guardianMode;
-    private int completedAtLastSwing;
-    private long lastSwingAt;
-    private boolean hasSwung;
     private int xpNeeded;
-    private Guardian aimedGuardian;
+    private LivingEntity aimedXpMob;
     private int craftTier;
     private ItemStack expectedSupply = ItemStack.EMPTY;
     private int countBeforeCraft;
@@ -322,9 +321,7 @@ public final class BookCycle implements ClientModInitializer {
                 xpWaitTicks = 0;
                 warnedNoCraftingTable = false;
                 guardianMode = withGuardians;
-                xpNeeded = 1;
-                completedAtLastSwing = 0;
-                hasSwung = false;
+                xpNeeded = withGuardians ? TARGET_LEVEL : 1;
                 tickCounter = 0;
                 recentCycleTicks.clear();
                 currentPhaseTicks.clear();
@@ -404,7 +401,7 @@ public final class BookCycle implements ClientModInitializer {
             case CRAFT_LAPIS -> craftLapis(client, (InventoryMenu) activeMenu);
             case OPEN_CRAFTING_TABLE -> loadCraftingTable(client);
             case CRAFT_LOOT -> craftLoot(client, (CraftingMenu) activeMenu);
-            case WAIT_FOR_XP, SWING -> tickGuardians(client);
+            case WAIT_FOR_XP, SWING -> tickXpFarm(client);
             case PREPARE_FOOD, RESTORE_FOOD -> stop("food_sync");
             case EAT -> tickEating(client);
         }
@@ -448,9 +445,8 @@ public final class BookCycle implements ClientModInitializer {
             waitForXp(xpNeeded, "xp");
             return;
         }
-        if (guardianMode && aimIfDue(client)) return;
         boolean needsLapis = !player.hasInfiniteMaterials()
-                && findItem(menu, Items.LAPIS_LAZULI, TABLE_LAPIS + 1, menu.slots.size()) < 0;
+                && countPlainItem(menu, Items.LAPIS_LAZULI, TABLE_LAPIS, menu.slots.size()) < TARGET_LAPIS;
         int freeSlots = freeInventorySlots();
         boolean inventoryPressure = freeSlots <= LOW_FREE_SLOTS && hasCleanupCandidate(menu);
         boolean emergencyPressure = freeSlots == 0 && hasEmergencyGuardianLoot(menu);
@@ -466,17 +462,27 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private boolean hasLapis(AbstractContainerMenu menu) {
-        return player.hasInfiniteMaterials() || menu.getSlot(TABLE_LAPIS).getItem().is(Items.LAPIS_LAZULI);
+        ItemStack lapis = menu.getSlot(TABLE_LAPIS).getItem();
+        return player.hasInfiniteMaterials() || (lapis.is(Items.LAPIS_LAZULI)
+                && lapis.getComponentsPatch().isEmpty() && lapis.getCount() >= TARGET_LAPIS);
     }
 
     private void moveLapis(Minecraft client, EnchantmentMenu menu) {
-        if (menu.getSlot(TABLE_LAPIS).hasItem() || menu.getStateId() == lapisMoveState) return;
+        if (hasLapis(menu) || menu.getStateId() == lapisMoveState) return;
         int index = findItem(menu, Items.LAPIS_LAZULI, TABLE_LAPIS + 1, menu.slots.size());
         if (index < 0) return;
 
         if (lapisMoveState != -1) LOGGER.info("Book Cycle is retrying the lapis move after a menu update");
         lapisMoveState = menu.getStateId();
-        click(client, menu, index, 0, ContainerInput.QUICK_MOVE, () -> hasLapis(menu), () -> {});
+        int before = menu.getSlot(TABLE_LAPIS).getItem().getCount();
+        click(client, menu, index, 0, ContainerInput.QUICK_MOVE,
+                () -> hasLapis(menu) || menu.getSlot(TABLE_LAPIS).getItem().getCount() > before,
+                () -> {
+                    if (!hasLapis(menu)) {
+                        lapisMoveState = -1;
+                        moveLapis(client, menu);
+                    }
+                });
     }
 
     private void putBookOnTable(Minecraft client, EnchantmentMenu menu) {
@@ -511,6 +517,15 @@ public final class BookCycle implements ClientModInitializer {
         for (int index = start; index < end; index++) {
             ItemStack stack = menu.getSlot(index).getItem();
             if (ItemStack.isSameItemSameComponents(stack, expected)) count += stack.getCount();
+        }
+        return count;
+    }
+
+    private static int countPlainItem(AbstractContainerMenu menu, Item item, int start, int end) {
+        int count = 0;
+        for (int index = start; index < end; index++) {
+            ItemStack stack = menu.getSlot(index).getItem();
+            if (stack.is(item) && stack.getComponentsPatch().isEmpty()) count += stack.getCount();
         }
         return count;
     }
@@ -777,8 +792,15 @@ public final class BookCycle implements ClientModInitializer {
             moveLapis(client, menu);
             return;
         }
-        int cost = menu.costs[FIRST_OFFER];
-        if (cost <= 0 || menu.enchantClue[FIRST_OFFER] < 0 || menu.levelClue[FIRST_OFFER] <= 0) {
+        int cost = menu.costs[TARGET_OFFER];
+        if (cost <= 0 || menu.enchantClue[TARGET_OFFER] < 0 || menu.levelClue[TARGET_OFFER] <= 0) {
+            return;
+        }
+        if (cost < TARGET_LEVEL) {
+            recoverBook(client, menu, TABLE_BOOK, () -> {
+                closeMenu();
+                stop("bookshelves", cost);
+            });
             return;
         }
         if (!player.hasInfiniteMaterials()) {
@@ -817,14 +839,14 @@ public final class BookCycle implements ClientModInitializer {
                 || !ItemStack.matches(menu.getSlot(TABLE_BOOK).getItem(), tableBook)
                 || !ItemStack.matches(menu.getSlot(TABLE_LAPIS).getItem(), lapisBeforeEnchant)) return;
 
-        int cost = menu.costs[FIRST_OFFER];
-        if (cost <= 0 || menu.enchantClue[FIRST_OFFER] < 0 || menu.levelClue[FIRST_OFFER] <= 0) return;
+        int cost = menu.costs[TARGET_OFFER];
+        if (cost < TARGET_LEVEL || menu.enchantClue[TARGET_OFFER] < 0 || menu.levelClue[TARGET_OFFER] <= 0) return;
         if (!player.hasInfiniteMaterials() && player.experienceLevel < cost) {
             waitForOfferXp(client, menu, cost);
             return;
         }
         retriedEnchant = true;
-        LOGGER.info("Book Cycle is retrying the first enchant offer after no result");
+        LOGGER.info("Book Cycle is retrying the level-30 enchant offer after no result");
         pressEnchant(client, menu);
     }
 
@@ -836,9 +858,9 @@ public final class BookCycle implements ClientModInitializer {
     private void pressEnchant(Minecraft client, EnchantmentMenu menu) {
         reserve(menu, () -> menu.getCarried().isEmpty() && ItemStack.matches(menu.getSlot(TABLE_BOOK).getItem(), tableBook)
                         && ItemStack.matches(menu.getSlot(TABLE_LAPIS).getItem(), lapisBeforeEnchant)
-                        && menu.getEnchantmentSeed() == enchantSeed && menu.costs[FIRST_OFFER] > 0
-                        && (player.hasInfiniteMaterials() || player.experienceLevel >= menu.costs[FIRST_OFFER]),
-                () -> client.gameMode.handleInventoryButtonClick(menu.containerId, FIRST_OFFER),
+                        && menu.getEnchantmentSeed() == enchantSeed && menu.costs[TARGET_OFFER] >= TARGET_LEVEL
+                        && (player.hasInfiniteMaterials() || player.experienceLevel >= menu.costs[TARGET_OFFER]),
+                () -> client.gameMode.handleInventoryButtonClick(menu.containerId, TARGET_OFFER),
                 () -> menu.getSlot(TABLE_BOOK).getItem().is(Items.ENCHANTED_BOOK), () -> {},
                 retriedEnchant ? null : () -> retryEnchant(client, menu));
     }
@@ -952,12 +974,9 @@ public final class BookCycle implements ClientModInitializer {
         finishCycleMetrics();
         closeMenu();
 
-        if (guardianMode && (completed - completedAtLastSwing >= CYCLES_PER_SWING)) {
-            recordPhase("SWING");
-            if (aimIfDue(client)) {
-                return;
-            }
-            step = Step.WAIT_FOR_XP;
+        if (guardianMode && !player.hasInfiniteMaterials() && player.experienceLevel < TARGET_LEVEL) {
+            recordPhase("WAIT_FOR_XP");
+            waitForXp(TARGET_LEVEL, "xp");
             return;
         }
         startNextCycle(client);
@@ -980,7 +999,7 @@ public final class BookCycle implements ClientModInitializer {
         message(player, "waiting_xp");
     }
 
-    private void tickGuardians(Minecraft client) {
+    private void tickXpFarm(Minecraft client) {
         if (client.gui.screen() != null || player.containerMenu != player.inventoryMenu || !isSingleBook()) {
             stop("stopped");
             return;
@@ -998,23 +1017,20 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         if (step == Step.SWING) {
-            if (canSwing() && aimedGuardian.isAlive() && player.isWithinEntityInteractionRange(aimedGuardian, 0)
-                    && lookingAt(aimedGuardian)) {
-                client.gameMode.attack(player, aimedGuardian);
+            if (aimedXpMob != null && canSwing() && aimedXpMob.isAlive()
+                    && player.isWithinEntityInteractionRange(aimedXpMob, 0) && lookingAt(aimedXpMob)) {
+                client.gameMode.attack(player, aimedXpMob);
                 player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
                 actionDelay = afterAttackDelayTicks;
-                completedAtLastSwing = completed;
-                lastSwingAt = System.nanoTime();
-                hasSwung = true;
                 recordPhase("WAIT_FOR_XP");
             }
-            aimedGuardian = null;
+            aimedXpMob = null;
             step = Step.WAIT_FOR_XP;
-        } else if (aimIfDue(client)) {
+        } else if (player.experienceLevel < xpNeeded && aimXpMob(client)) {
             return;
         }
         if (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded) {
-            xpNeeded = 1;
+            xpNeeded = guardianMode ? TARGET_LEVEL : 1;
             xpWaitTicks = 0;
             startNextCycle(client);
         }
@@ -1127,28 +1143,27 @@ public final class BookCycle implements ClientModInitializer {
         open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
     }
 
-    private boolean aimIfDue(Minecraft client) {
-        boolean due = completed - completedAtLastSwing >= CYCLES_PER_SWING;
-        boolean needsXp = step == Step.WAIT_FOR_XP && player.experienceLevel < xpNeeded;
-        if (!due && (!needsXp || (hasSwung && System.nanoTime() - lastSwingAt < XP_SWING_COOLDOWN))) return false;
-        if (!canSwing()) return false;
+    private boolean aimXpMob(Minecraft client) {
+        if (!guardianMode || step != Step.WAIT_FOR_XP || player.experienceLevel >= xpNeeded || !canSwing()) return false;
         Vec3 eye = player.getEyePosition();
-        var nearby = client.level.getEntitiesOfClass(Guardian.class,
+        var nearby = client.level.getEntitiesOfClass(LivingEntity.class,
                 new AABB(eye, eye).inflate(player.entityInteractionRange()),
-                mob -> mob.getType() == EntityTypes.GUARDIAN && mob.isAlive() && mob.isAttackable()
+                mob -> (mob instanceof Guardian || mob instanceof Silverfish) && mob.isAlive() && mob.isAttackable()
                         && player.isWithinEntityInteractionRange(mob, 0));
-        nearby.sort(Comparator.comparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
+        nearby.sort(Comparator
+                .comparingInt((LivingEntity mob) -> mob instanceof Guardian ? 0 : 1)
+                .thenComparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
         float yaw = player.getYRot();
         float pitch = player.getXRot();
-        for (Guardian guardian : nearby) {
-            AABB box = guardian.getBoundingBox();
+        for (LivingEntity mob : nearby) {
+            AABB box = mob.getBoundingBox();
             Vec3 center = box.getCenter();
             double offset = (box.maxY - box.minY) * 0.3;
             for (Vec3 point : new Vec3[]{center, center.add(0, -offset, 0), center.add(0, offset, 0)}) {
                 player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
-                if (lookingAt(guardian)) {
+                if (lookingAt(mob)) {
                     closeMenu();
-                    aimedGuardian = guardian;
+                    aimedXpMob = mob;
                     step = Step.SWING;
                     return true;
                 }
@@ -1159,8 +1174,8 @@ public final class BookCycle implements ClientModInitializer {
         return false;
     }
 
-    private boolean lookingAt(Guardian guardian) {
-        return player.raycastHitResult(1, player) instanceof EntityHitResult hit && hit.getEntity() == guardian;
+    private boolean lookingAt(LivingEntity mob) {
+        return player.raycastHitResult(1, player) instanceof EntityHitResult hit && hit.getEntity() == mob;
     }
 
     private boolean canSwing() {
@@ -1546,7 +1561,7 @@ public final class BookCycle implements ClientModInitializer {
         checkedBarrels.clear();
         expectedSupply = ItemStack.EMPTY;
         tableBook = ItemStack.EMPTY;
-        aimedGuardian = null;
+        aimedXpMob = null;
         lootRecipe = null;
         pickedIngredient = ItemStack.EMPTY;
         skipLootCrafting = false;

@@ -1,6 +1,6 @@
 {
   "key.book_cycle.control": "本のエンチャント反復",
-  "key.book_cycle.guardian": "本のエンチャント反復（ガーディアン自動攻撃付き）",
+  "key.book_cycle.guardian": "Lv30本エンチャント反復（XPモブ自動攻撃付き）",
   "key.book_cycle.controls": "Book Cycle の操作画面を開く",
   "book_cycle.delay": "追加待ち (0〜20 tick)",
   "book_cycle.attack_delay": "攻撃後の待ち (0〜40 tick)",
@@ -12,9 +12,9 @@
   "book_cycle.stance": "しゃがみやフリーカメラを解除し、スペクテイター以外で開始してください。",
   "book_cycle.book": "ホットバーの1枠に普通の本を1冊だけ入れてください。",
   "book_cycle.started": "エンチャント反復を開始しました。Esc で停止します。",
-  "book_cycle.guardian_started": "2周ごとにガーディアンを攻撃します。Esc で停止します。",
-  "book_cycle.sword": "ガーディアンを攻撃するにはメインハンドに剣を持ってください。",
-  "book_cycle.waiting_xp": "経験値が足りません。補充されるまで待機します。",
+  "book_cycle.guardian_started": "Lv30枠を使用し、Lv30未満ではガーディアンまたはシルバーフィッシュからXPを補充します。Esc で停止します。",
+  "book_cycle.sword": "XPモブを攻撃するにはメインハンドに剣を持ってください。",
+  "book_cycle.waiting_xp": "Lv30まで経験値を補充します。",
   "book_cycle.finished": "本のエンチャント反復を停止しました（完了 %s 回）。%s",
   "book_cycle.stopped": "操作を中断しました。",
   "book_cycle.changed": "画面またはインベントリの状態が変わりました。",
@@ -33,6 +33,7 @@
   "book_cycle.loot_crafting_table": "手が届く作業台が見つからないため、欠片とクリスタルを保留します。",
   "book_cycle.loot_craft_skipped": "作業台でドロップを整理できなかったため、素材を保留してラピス補充に進みます。",
   "book_cycle.xp": "経験値が1レベル以上必要です。",
-  "book_cycle.xp_offer": "一番上の候補を選ぶには経験値レベル %s が必要です。",
+  "book_cycle.xp_offer": "Lv30枠を選ぶには経験値レベル %s が必要です。",
+  "book_cycle.bookshelves": "3番目の候補がLv30ではありません（現在 %s）。本棚15個の配置を確認してください。",
   "book_cycle.result": "砥石の結果が普通の本になりません。"
 }
