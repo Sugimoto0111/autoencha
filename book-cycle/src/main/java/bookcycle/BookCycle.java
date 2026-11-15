@@ -152,7 +152,7 @@ public final class BookCycle implements ClientModInitializer {
     private boolean guardianMode;
     private int xpNeeded;
     private LivingEntity aimedXpMob;
-    private boolean guardianPriorityPending;
+    private boolean nextXpTargetGuardian;
     private int craftTier;
     private ItemStack expectedSupply = ItemStack.EMPTY;
     private int countBeforeCraft;
@@ -323,7 +323,7 @@ public final class BookCycle implements ClientModInitializer {
                 warnedNoCraftingTable = false;
                 guardianMode = withGuardians;
                 xpNeeded = withGuardians ? TARGET_LEVEL : 1;
-                guardianPriorityPending = false;
+                nextXpTargetGuardian = true;
                 tickCounter = 0;
                 recentCycleTicks.clear();
                 currentPhaseTicks.clear();
@@ -992,7 +992,6 @@ public final class BookCycle implements ClientModInitializer {
 
         if (guardianMode) {
             xpNeeded = TARGET_LEVEL;
-            guardianPriorityPending = true;
             recordPhase("WAIT_FOR_XP");
             closeMenu();
             step = Step.WAIT_FOR_XP;
@@ -1043,20 +1042,17 @@ public final class BookCycle implements ClientModInitializer {
                 client.gameMode.attack(player, target);
                 player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
                 actionDelay = afterAttackDelayTicks;
-                if (target instanceof Guardian) guardianPriorityPending = false;
+                nextXpTargetGuardian = target instanceof Silverfish;
                 recordPhase("WAIT_FOR_XP");
             }
             aimedXpMob = null;
             step = Step.WAIT_FOR_XP;
-        } else {
-            if (guardianPriorityPending) {
-                if (!canSwing()) return;
-                if (aimGuardianPriority(client)) return;
-                guardianPriorityPending = false;
-            }
-            if (player.experienceLevel < xpNeeded && aimXpMob(client)) return;
+        } else if (player.experienceLevel < xpNeeded) {
+            if (!canSwing()) return;
+            if (aimXpMob(client, nextXpTargetGuardian)) return;
+            if (aimXpMob(client, !nextXpTargetGuardian)) return;
         }
-        if (!guardianPriorityPending && (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded)) {
+        if (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded) {
             xpNeeded = guardianMode ? TARGET_LEVEL : 1;
             xpWaitTicks = 0;
             startNextCycle(client);
@@ -1170,60 +1166,14 @@ public final class BookCycle implements ClientModInitializer {
         open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
     }
 
-    private boolean aimGuardianPriority(Minecraft client) {
-        if (!guardianMode || step != Step.WAIT_FOR_XP || !canSwing()) return false;
-        Vec3 eye = player.getEyePosition();
-        var guardians = client.level.getEntitiesOfClass(Guardian.class,
-                new AABB(eye, eye).inflate(player.entityInteractionRange()),
-                mob -> mob.isAlive() && mob.isAttackable() && player.isWithinEntityInteractionRange(mob, 0));
-        guardians.sort(Comparator.comparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
-        if (guardians.isEmpty()) return false;
-
-        float yaw = player.getYRot();
-        float pitch = player.getXRot();
-        for (Guardian guardian : guardians) {
-            AABB box = guardian.getBoundingBox();
-            Vec3 center = box.getCenter();
-            double offset = (box.maxY - box.minY) * 0.3;
-            for (Vec3 point : new Vec3[]{center, center.add(0, -offset, 0), center.add(0, offset, 0)}) {
-                player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
-                var hit = player.raycastHitResult(1, player);
-                if (hit instanceof EntityHitResult entityHit) {
-                    if (entityHit.getEntity() instanceof Guardian hitGuardian
-                            && hitGuardian.isAlive() && hitGuardian.isAttackable()
-                            && player.isWithinEntityInteractionRange(hitGuardian, 0)) {
-                        closeMenu();
-                        aimedXpMob = hitGuardian;
-                        step = Step.SWING;
-                        return true;
-                    }
-                    if (entityHit.getEntity() instanceof Silverfish silverfish
-                            && silverfish.isAlive() && silverfish.isAttackable()
-                            && player.isWithinEntityInteractionRange(silverfish, 0)) {
-                        // Clear only the silverfish that is physically blocking the preferred guardian.
-                        closeMenu();
-                        aimedXpMob = silverfish;
-                        step = Step.SWING;
-                        return true;
-                    }
-                }
-            }
-        }
-        player.setYRot(yaw);
-        player.setXRot(pitch);
-        return false;
-    }
-
-    private boolean aimXpMob(Minecraft client) {
+    private boolean aimXpMob(Minecraft client, boolean guardianTarget) {
         if (!guardianMode || step != Step.WAIT_FOR_XP || player.experienceLevel >= xpNeeded || !canSwing()) return false;
         Vec3 eye = player.getEyePosition();
         var nearby = client.level.getEntitiesOfClass(LivingEntity.class,
                 new AABB(eye, eye).inflate(player.entityInteractionRange()),
-                mob -> (mob instanceof Guardian || mob instanceof Silverfish) && mob.isAlive() && mob.isAttackable()
-                        && player.isWithinEntityInteractionRange(mob, 0));
-        nearby.sort(Comparator
-                .comparingInt((LivingEntity mob) -> mob instanceof Guardian ? 0 : 1)
-                .thenComparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
+                mob -> (guardianTarget ? mob instanceof Guardian : mob instanceof Silverfish)
+                        && mob.isAlive() && mob.isAttackable() && player.isWithinEntityInteractionRange(mob, 0));
+        nearby.sort(Comparator.comparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
         float yaw = player.getYRot();
         float pitch = player.getXRot();
         for (LivingEntity mob : nearby) {
@@ -1633,7 +1583,7 @@ public final class BookCycle implements ClientModInitializer {
         expectedSupply = ItemStack.EMPTY;
         tableBook = ItemStack.EMPTY;
         aimedXpMob = null;
-        guardianPriorityPending = false;
+        nextXpTargetGuardian = true;
         lootRecipe = null;
         pickedIngredient = ItemStack.EMPTY;
         skipLootCrafting = false;

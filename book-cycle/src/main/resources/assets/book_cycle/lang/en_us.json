@@ -12,7 +12,7 @@
   "book_cycle.stance": "Stand up and exit spectator mode or free camera before starting.",
   "book_cycle.book": "Put exactly one regular book in a hotbar slot.",
   "book_cycle.started": "Book cycle started. Press Esc to stop.",
-  "book_cycle.guardian_started": "Uses the level-30 offer, prioritizes a guardian each cycle, then fills missing XP with silverfish. Press Esc to stop.",
+  "book_cycle.guardian_started": "Uses the level-30 offer and alternates guardian then silverfish attacks while refilling XP. Press Esc to stop.",
   "book_cycle.sword": "Hold a sword in your main hand to attack XP mobs.",
   "book_cycle.waiting_xp": "Refilling experience to level 30.",
   "book_cycle.finished": "Book cycle stopped (%s completed). %s",
