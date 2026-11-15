@@ -152,6 +152,7 @@ public final class BookCycle implements ClientModInitializer {
     private boolean guardianMode;
     private int xpNeeded;
     private LivingEntity aimedXpMob;
+    private boolean guardianPriorityPending;
     private int craftTier;
     private ItemStack expectedSupply = ItemStack.EMPTY;
     private int countBeforeCraft;
@@ -322,6 +323,7 @@ public final class BookCycle implements ClientModInitializer {
                 warnedNoCraftingTable = false;
                 guardianMode = withGuardians;
                 xpNeeded = withGuardians ? TARGET_LEVEL : 1;
+                guardianPriorityPending = false;
                 tickCounter = 0;
                 recentCycleTicks.clear();
                 currentPhaseTicks.clear();
@@ -988,9 +990,13 @@ public final class BookCycle implements ClientModInitializer {
         finishCycleMetrics();
         closeMenu();
 
-        if (guardianMode && !player.hasInfiniteMaterials() && player.experienceLevel < TARGET_LEVEL) {
+        if (guardianMode) {
+            xpNeeded = TARGET_LEVEL;
+            guardianPriorityPending = true;
             recordPhase("WAIT_FOR_XP");
-            waitForXp(TARGET_LEVEL, "xp");
+            closeMenu();
+            step = Step.WAIT_FOR_XP;
+            xpWaitTicks = 0;
             return;
         }
         startNextCycle(client);
@@ -1031,19 +1037,25 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         if (step == Step.SWING) {
-            if (aimedXpMob != null && canSwing() && aimedXpMob.isAlive()
-                    && player.isWithinEntityInteractionRange(aimedXpMob, 0) && lookingAt(aimedXpMob)) {
-                client.gameMode.attack(player, aimedXpMob);
+            LivingEntity target = aimedXpMob;
+            if (target != null && canSwing() && target.isAlive()
+                    && player.isWithinEntityInteractionRange(target, 0) && lookingAt(target)) {
+                client.gameMode.attack(player, target);
                 player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
                 actionDelay = afterAttackDelayTicks;
+                if (target instanceof Guardian) guardianPriorityPending = false;
                 recordPhase("WAIT_FOR_XP");
             }
             aimedXpMob = null;
             step = Step.WAIT_FOR_XP;
-        } else if (player.experienceLevel < xpNeeded && aimXpMob(client)) {
-            return;
+        } else {
+            if (guardianPriorityPending) {
+                if (aimGuardianPriority(client)) return;
+                guardianPriorityPending = false;
+            }
+            if (player.experienceLevel < xpNeeded && aimXpMob(client)) return;
         }
-        if (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded) {
+        if (!guardianPriorityPending && (player.hasInfiniteMaterials() || player.experienceLevel >= xpNeeded)) {
             xpNeeded = guardianMode ? TARGET_LEVEL : 1;
             xpWaitTicks = 0;
             startNextCycle(client);
@@ -1155,6 +1167,48 @@ public final class BookCycle implements ClientModInitializer {
         selectedBeforeEating = -1;
         foodInventorySlot = -1;
         open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+    }
+
+    private boolean aimGuardianPriority(Minecraft client) {
+        if (!guardianMode || step != Step.WAIT_FOR_XP || !canSwing()) return false;
+        Vec3 eye = player.getEyePosition();
+        var guardians = client.level.getEntitiesOfClass(Guardian.class,
+                new AABB(eye, eye).inflate(player.entityInteractionRange()),
+                mob -> mob.isAlive() && mob.isAttackable() && player.isWithinEntityInteractionRange(mob, 0));
+        guardians.sort(Comparator.comparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
+        if (guardians.isEmpty()) return false;
+
+        float yaw = player.getYRot();
+        float pitch = player.getXRot();
+        for (Guardian guardian : guardians) {
+            AABB box = guardian.getBoundingBox();
+            Vec3 center = box.getCenter();
+            double offset = (box.maxY - box.minY) * 0.3;
+            for (Vec3 point : new Vec3[]{center, center.add(0, -offset, 0), center.add(0, offset, 0)}) {
+                player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
+                var hit = player.raycastHitResult(1, player);
+                if (hit instanceof EntityHitResult entityHit) {
+                    if (entityHit.getEntity() == guardian) {
+                        closeMenu();
+                        aimedXpMob = guardian;
+                        step = Step.SWING;
+                        return true;
+                    }
+                    if (entityHit.getEntity() instanceof Silverfish silverfish
+                            && silverfish.isAlive() && silverfish.isAttackable()
+                            && player.isWithinEntityInteractionRange(silverfish, 0)) {
+                        // Clear only the silverfish that is physically blocking the preferred guardian.
+                        closeMenu();
+                        aimedXpMob = silverfish;
+                        step = Step.SWING;
+                        return true;
+                    }
+                }
+            }
+        }
+        player.setYRot(yaw);
+        player.setXRot(pitch);
+        return false;
     }
 
     private boolean aimXpMob(Minecraft client) {
@@ -1576,6 +1630,7 @@ public final class BookCycle implements ClientModInitializer {
         expectedSupply = ItemStack.EMPTY;
         tableBook = ItemStack.EMPTY;
         aimedXpMob = null;
+        guardianPriorityPending = false;
         lootRecipe = null;
         pickedIngredient = ItemStack.EMPTY;
         skipLootCrafting = false;

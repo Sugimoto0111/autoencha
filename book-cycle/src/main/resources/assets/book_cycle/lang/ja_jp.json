@@ -12,7 +12,7 @@
   "book_cycle.stance": "しゃがみやフリーカメラを解除し、スペクテイター以外で開始してください。",
   "book_cycle.book": "ホットバーの1枠に普通の本を1冊だけ入れてください。",
   "book_cycle.started": "エンチャント反復を開始しました。Esc で停止します。",
-  "book_cycle.guardian_started": "Lv30枠を使用し、Lv30未満ではガーディアンまたはシルバーフィッシュからXPを補充します。Esc で停止します。",
+  "book_cycle.guardian_started": "Lv30枠を使用し、各周回でガーディアンを優先してから不足XPをシルバーフィッシュで補充します。Esc で停止します。",
   "book_cycle.sword": "XPモブを攻撃するにはメインハンドに剣を持ってください。",
   "book_cycle.waiting_xp": "Lv30まで経験値を補充します。",
   "book_cycle.finished": "本のエンチャント反復を停止しました（完了 %s 回）。%s",
