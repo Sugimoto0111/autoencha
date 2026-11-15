@@ -95,7 +95,7 @@ public final class BookCycle implements ClientModInitializer {
     private static final int TARGET_LEVEL = 30;
     private static final int TARGET_LAPIS = TARGET_OFFER + 1;
     private static final double[] AIM_FRACTIONS = {0.5, 0.08, 0.92};
-    private static final double[] ENTITY_AIM_FRACTIONS = {0.5, 0.15, 0.85, 0.3, 0.7, 0.05, 0.95};
+    private static final int ENTITY_AIM_GRID = 9;
     private static final long EAT_RETRY_DELAY = TimeUnit.SECONDS.toNanos(5);
     private static final List<String> ROMAN_TIERS = List.of("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX");
     private static final Pattern COMPRESSED_LAPIS = Pattern.compile(
@@ -1199,16 +1199,66 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private Vec3 findVisibleAimPoint(Minecraft client, LivingEntity mob) {
+        if (!mob.isAlive() || !player.isWithinEntityInteractionRange(mob, 0)) return null;
+
         AABB box = mob.getBoundingBox();
-        for (double y : ENTITY_AIM_FRACTIONS) {
-            for (double x : ENTITY_AIM_FRACTIONS) {
-                for (double z : ENTITY_AIM_FRACTIONS) {
-                    Vec3 point = new Vec3(
-                            box.minX + box.getXsize() * x,
-                            box.minY + box.getYsize() * y,
-                            box.minZ + box.getZsize() * z);
-                    if (isAimPointVisible(client, mob, point)) return point;
-                }
+        Vec3 eye = player.getEyePosition();
+
+        // Try the geometrically nearest point first. This is the fast path for unobstructed mobs.
+        Vec3 nearest = new Vec3(
+                Math.max(box.minX, Math.min(eye.x, box.maxX)),
+                Math.max(box.minY, Math.min(eye.y, box.maxY)),
+                Math.max(box.minZ, Math.min(eye.z, box.maxZ)));
+        if (isAimPointVisible(client, mob, nearest)) return nearest;
+
+        // Scan only the box faces that can face the player's eyes. Every valid attack ray
+        // enters the hitbox through one of these surfaces, so this covers narrow openings
+        // much better than testing a handful of fixed interior points.
+        if (eye.x <= box.minX) {
+            Vec3 point = scanAimFace(client, mob, box, 0, box.minX);
+            if (point != null) return point;
+        } else if (eye.x >= box.maxX) {
+            Vec3 point = scanAimFace(client, mob, box, 0, box.maxX);
+            if (point != null) return point;
+        }
+
+        if (eye.y <= box.minY) {
+            Vec3 point = scanAimFace(client, mob, box, 1, box.minY);
+            if (point != null) return point;
+        } else if (eye.y >= box.maxY) {
+            Vec3 point = scanAimFace(client, mob, box, 1, box.maxY);
+            if (point != null) return point;
+        }
+
+        if (eye.z <= box.minZ) {
+            Vec3 point = scanAimFace(client, mob, box, 2, box.minZ);
+            if (point != null) return point;
+        } else if (eye.z >= box.maxZ) {
+            Vec3 point = scanAimFace(client, mob, box, 2, box.maxZ);
+            if (point != null) return point;
+        }
+
+        return null;
+    }
+
+    private Vec3 scanAimFace(Minecraft client, LivingEntity mob, AABB box, int axis, double fixed) {
+        for (int first = 0; first < ENTITY_AIM_GRID; first++) {
+            double a = (first + 0.5) / ENTITY_AIM_GRID;
+            for (int second = 0; second < ENTITY_AIM_GRID; second++) {
+                double b = (second + 0.5) / ENTITY_AIM_GRID;
+                Vec3 point = switch (axis) {
+                    case 0 -> new Vec3(fixed,
+                            box.minY + box.getYsize() * a,
+                            box.minZ + box.getZsize() * b);
+                    case 1 -> new Vec3(
+                            box.minX + box.getXsize() * a, fixed,
+                            box.minZ + box.getZsize() * b);
+                    case 2 -> new Vec3(
+                            box.minX + box.getXsize() * a,
+                            box.minY + box.getYsize() * b, fixed);
+                    default -> throw new IllegalArgumentException("axis");
+                };
+                if (isAimPointVisible(client, mob, point)) return point;
             }
         }
         return null;
