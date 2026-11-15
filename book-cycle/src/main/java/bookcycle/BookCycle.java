@@ -95,6 +95,7 @@ public final class BookCycle implements ClientModInitializer {
     private static final int TARGET_LEVEL = 30;
     private static final int TARGET_LAPIS = TARGET_OFFER + 1;
     private static final double[] AIM_FRACTIONS = {0.5, 0.08, 0.92};
+    private static final double[] ENTITY_AIM_FRACTIONS = {0.5, 0.15, 0.85, 0.3, 0.7, 0.05, 0.95};
     private static final long EAT_RETRY_DELAY = TimeUnit.SECONDS.toNanos(5);
     private static final List<String> ROMAN_TIERS = List.of("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX");
     private static final Pattern COMPRESSED_LAPIS = Pattern.compile(
@@ -152,6 +153,7 @@ public final class BookCycle implements ClientModInitializer {
     private boolean guardianMode;
     private int xpNeeded;
     private LivingEntity aimedXpMob;
+    private Vec3 aimedXpPoint;
     private boolean nextXpTargetGuardian;
     private int craftTier;
     private ItemStack expectedSupply = ItemStack.EMPTY;
@@ -1037,8 +1039,11 @@ public final class BookCycle implements ClientModInitializer {
         }
         if (step == Step.SWING) {
             LivingEntity target = aimedXpMob;
-            if (target != null && canSwing() && target.isAlive()
-                    && player.isWithinEntityInteractionRange(target, 0) && lookingAt(target)) {
+            Vec3 aimPoint = aimedXpPoint;
+            if (target != null && aimPoint != null && canSwing() && target.isAlive()
+                    && player.isWithinEntityInteractionRange(target, 0)
+                    && isAimPointVisible(client, target, aimPoint)) {
+                player.lookAt(EntityAnchorArgument.Anchor.EYES, aimPoint);
                 client.gameMode.attack(player, target);
                 player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
                 actionDelay = afterAttackDelayTicks;
@@ -1046,6 +1051,7 @@ public final class BookCycle implements ClientModInitializer {
                 recordPhase("WAIT_FOR_XP");
             }
             aimedXpMob = null;
+            aimedXpPoint = null;
             step = Step.WAIT_FOR_XP;
         } else if (player.experienceLevel < xpNeeded) {
             if (!canSwing()) return;
@@ -1174,29 +1180,46 @@ public final class BookCycle implements ClientModInitializer {
                 mob -> (guardianTarget ? mob instanceof Guardian : mob instanceof Silverfish)
                         && mob.isAlive() && mob.isAttackable() && player.isWithinEntityInteractionRange(mob, 0));
         nearby.sort(Comparator.comparingDouble(mob -> mob.getBoundingBox().distanceToSqr(eye)));
+
         float yaw = player.getYRot();
         float pitch = player.getXRot();
         for (LivingEntity mob : nearby) {
-            AABB box = mob.getBoundingBox();
-            Vec3 center = box.getCenter();
-            double offset = (box.maxY - box.minY) * 0.3;
-            for (Vec3 point : new Vec3[]{center, center.add(0, -offset, 0), center.add(0, offset, 0)}) {
-                player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
-                if (lookingAt(mob)) {
-                    closeMenu();
-                    aimedXpMob = mob;
-                    step = Step.SWING;
-                    return true;
-                }
-            }
+            Vec3 point = findVisibleAimPoint(client, mob);
+            if (point == null) continue;
+            player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
+            closeMenu();
+            aimedXpMob = mob;
+            aimedXpPoint = point;
+            step = Step.SWING;
+            return true;
         }
         player.setYRot(yaw);
         player.setXRot(pitch);
         return false;
     }
 
-    private boolean lookingAt(LivingEntity mob) {
-        return player.raycastHitResult(1, player) instanceof EntityHitResult hit && hit.getEntity() == mob;
+    private Vec3 findVisibleAimPoint(Minecraft client, LivingEntity mob) {
+        AABB box = mob.getBoundingBox();
+        for (double y : ENTITY_AIM_FRACTIONS) {
+            for (double x : ENTITY_AIM_FRACTIONS) {
+                for (double z : ENTITY_AIM_FRACTIONS) {
+                    Vec3 point = new Vec3(
+                            box.minX + box.getXsize() * x,
+                            box.minY + box.getYsize() * y,
+                            box.minZ + box.getZsize() * z);
+                    if (isAimPointVisible(client, mob, point)) return point;
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean isAimPointVisible(Minecraft client, LivingEntity mob, Vec3 point) {
+        if (!mob.isAlive() || !player.isWithinEntityInteractionRange(mob, 0)) return false;
+        Vec3 eye = player.getEyePosition();
+        BlockHitResult blockHit = client.level.clip(new ClipContext(
+                eye, point, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+        return blockHit.getType() == HitResult.Type.MISS;
     }
 
     private boolean canSwing() {
@@ -1583,6 +1606,7 @@ public final class BookCycle implements ClientModInitializer {
         expectedSupply = ItemStack.EMPTY;
         tableBook = ItemStack.EMPTY;
         aimedXpMob = null;
+        aimedXpPoint = null;
         nextXpTargetGuardian = true;
         lootRecipe = null;
         pickedIngredient = ItemStack.EMPTY;
