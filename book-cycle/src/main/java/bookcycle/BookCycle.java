@@ -169,8 +169,7 @@ public final class BookCycle implements ClientModInitializer {
     private boolean warnedNoCraftingTable;
     private int selectedBeforeEating = -1;
     private int mealHotbarSlot;
-    private int foodInventorySlot = -1;
-    private ItemStack displacedHand = ItemStack.EMPTY;
+    private Step mealResumeStep;
     private InteractionHand foodHand;
     private ItemStack eatingStack = ItemStack.EMPTY;
     private long lastFailedMeal;
@@ -1034,6 +1033,11 @@ public final class BookCycle implements ClientModInitializer {
             if (tryEat(client)) return;
         }
         if (!player.getMainHandItem().is(ItemTags.SWORDS)) {
+            int swordSlot = findHotbarSword();
+            if (swordSlot >= 0) {
+                player.getInventory().setSelectedSlot(swordSlot);
+                return;
+            }
             stop("sword");
             return;
         }
@@ -1077,6 +1081,7 @@ public final class BookCycle implements ClientModInitializer {
         if (player.hasInfiniteMaterials() || player.getFoodData().getFoodLevel() > threshold || player.isUsingItem()
                 || (lastFailedMeal != 0 && System.nanoTime() - lastFailedMeal < EAT_RETRY_DELAY)) return false;
 
+        mealResumeStep = step;
         Inventory inventory = player.getInventory();
         foodHand = InteractionHand.MAIN_HAND;
         if (safeFood(player.getOffhandItem()) && FISH.contains(player.getOffhandItem().getItem())) {
@@ -1107,14 +1112,18 @@ public final class BookCycle implements ClientModInitializer {
             return true;
         }
 
-        foodInventorySlot = source;
-        mealHotbarSlot = selectedBeforeEating == bookSlot ? (bookSlot + 1) % Inventory.getSelectionSize() : selectedBeforeEating;
-        displacedHand = inventory.getItem(mealHotbarSlot).copy();
+        mealHotbarSlot = chooseMealHotbarSlot(inventory, selectedBeforeEating);
+        if (mealHotbarSlot < 0) {
+            mealResumeStep = null;
+            return false;
+        }
         closeMenu();
         InventoryMenu menu = player.inventoryMenu;
         advance(Step.PREPARE_FOOD);
         click(client, menu, InventoryMenu.INV_SLOT_START + source - Inventory.getSelectionSize(),
                 mealHotbarSlot, ContainerInput.SWAP, () -> true, () -> {
+                    // Keep the food in this hotbar slot after eating. The sword never leaves its slot,
+                    // so future meals only need a cheap selected-slot change instead of two inventory swaps.
                     inventory.setSelectedSlot(mealHotbarSlot);
                     prepareMeal(client);
                 });
@@ -1149,27 +1158,44 @@ public final class BookCycle implements ClientModInitializer {
             lastFailedMeal = System.nanoTime();
         }
         eatingPlayer = null;
-        if (foodInventorySlot < 0) {
-            finishMeal(client);
-            return;
-        }
-        if (player.getInventory().getSelectedSlot() != mealHotbarSlot
-                || !ItemStack.matches(player.getInventory().getItem(foodInventorySlot), displacedHand)
-                || (!inHand.isEmpty() && !ItemStack.isSameItemSameComponents(inHand, eatingStack))) {
-            stop("food_sync");
-            return;
-        }
-        InventoryMenu menu = player.inventoryMenu;
-        advance(Step.RESTORE_FOOD);
-        click(client, menu, InventoryMenu.INV_SLOT_START + foodInventorySlot - Inventory.getSelectionSize(),
-                mealHotbarSlot, ContainerInput.SWAP, () -> true, () -> finishMeal(client));
+        finishMeal(client);
     }
 
     private void finishMeal(Minecraft client) {
-        player.getInventory().setSelectedSlot(selectedBeforeEating);
+        int restoreSlot = selectedBeforeEating;
+        if (guardianMode && (restoreSlot < 0 || !player.getInventory().getItem(restoreSlot).is(ItemTags.SWORDS))) {
+            int swordSlot = findHotbarSword();
+            if (swordSlot >= 0) restoreSlot = swordSlot;
+        }
+        if (restoreSlot >= 0) player.getInventory().setSelectedSlot(restoreSlot);
+
+        Step resume = mealResumeStep;
         selectedBeforeEating = -1;
-        foodInventorySlot = -1;
+        mealResumeStep = null;
+
+        if (resume == Step.WAIT_FOR_XP) {
+            step = Step.WAIT_FOR_XP;
+            actionDelay = Math.max(actionDelay, OPEN_DELAY_TICKS);
+            return;
+        }
         open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+    }
+
+    private int chooseMealHotbarSlot(Inventory inventory, int selectedSlot) {
+        int fallback = -1;
+        for (int slot = 0; slot < Inventory.getSelectionSize(); slot++) {
+            if (slot == selectedSlot || slot == bookSlot) continue;
+            if (inventory.getItem(slot).isEmpty()) return slot;
+            if (fallback < 0 && !inventory.getItem(slot).is(ItemTags.SWORDS)) fallback = slot;
+        }
+        return fallback;
+    }
+
+    private int findHotbarSword() {
+        for (int slot = 0; slot < Inventory.getSelectionSize(); slot++) {
+            if (player.getInventory().getItem(slot).is(ItemTags.SWORDS)) return slot;
+        }
+        return -1;
     }
 
     private boolean aimXpMob(Minecraft client, boolean guardianTarget) {
@@ -1644,7 +1670,7 @@ public final class BookCycle implements ClientModInitializer {
             player.getInventory().setSelectedSlot(selectedBeforeEating);
         }
         selectedBeforeEating = -1;
-        foodInventorySlot = -1;
+        mealResumeStep = null;
         lastFailedMeal = 0;
         activeMenu = null;
         menuAction = null;
