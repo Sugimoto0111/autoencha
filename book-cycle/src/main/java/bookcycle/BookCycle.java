@@ -1050,6 +1050,7 @@ public final class BookCycle implements ClientModInitializer {
             step = Step.WAIT_FOR_XP;
         } else {
             if (guardianPriorityPending) {
+                if (!canSwing()) return;
                 if (aimGuardianPriority(client)) return;
                 guardianPriorityPending = false;
             }
@@ -1188,9 +1189,11 @@ public final class BookCycle implements ClientModInitializer {
                 player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
                 var hit = player.raycastHitResult(1, player);
                 if (hit instanceof EntityHitResult entityHit) {
-                    if (entityHit.getEntity() == guardian) {
+                    if (entityHit.getEntity() instanceof Guardian hitGuardian
+                            && hitGuardian.isAlive() && hitGuardian.isAttackable()
+                            && player.isWithinEntityInteractionRange(hitGuardian, 0)) {
                         closeMenu();
-                        aimedXpMob = guardian;
+                        aimedXpMob = hitGuardian;
                         step = Step.SWING;
                         return true;
                     }
