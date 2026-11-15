@@ -371,11 +371,12 @@ public final class BookCycle implements ClientModInitializer {
                 lootCleanupOnly = false;
                 message(player, "loot_craft_skipped");
                 open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+            } else if (step == Step.PREPARE_FOOD || step == Step.EAT || step == Step.RESTORE_FOOD) {
+                failMeal(client, "timeout");
             } else if (!recoverAfterTimeout(client)) {
                 stop(switch (step) {
                     case ENCHANT -> hasLapis(activeMenu) ? "timeout" : "lapis_sync_timeout";
                     case TAKE_ENCHANTED -> "enchant_timeout";
-                    case PREPARE_FOOD, EAT, RESTORE_FOOD -> "food_sync";
                     default -> "timeout";
                 });
             }
@@ -1104,7 +1105,10 @@ public final class BookCycle implements ClientModInitializer {
             prepareMeal(client);
             return true;
         }
-        if (source < 0) return false;
+        if (source < 0) {
+            mealResumeStep = null;
+            return false;
+        }
         selectedBeforeEating = inventory.getSelectedSlot();
         if (Inventory.isHotbarSlot(source)) {
             inventory.setSelectedSlot(source);
@@ -1145,7 +1149,7 @@ public final class BookCycle implements ClientModInitializer {
         ItemStack inHand = player.getItemInHand(foodHand);
         if (eatingPlayer != player) {
             if (!safeFood(inHand) || !ItemStack.matches(inHand, eatingStack)) {
-                stop("food_sync");
+                failMeal(client, "held item changed");
                 return;
             }
             eatingPlayer = player;
@@ -1158,6 +1162,14 @@ public final class BookCycle implements ClientModInitializer {
             lastFailedMeal = System.nanoTime();
         }
         eatingPlayer = null;
+        finishMeal(client);
+    }
+
+    private void failMeal(Minecraft client, String reason) {
+        LOGGER.warn("Book Cycle meal attempt failed ({}); resuming and retrying later", reason);
+        eatingPlayer = null;
+        eatingStack = ItemStack.EMPTY;
+        lastFailedMeal = System.nanoTime();
         finishMeal(client);
     }
 
