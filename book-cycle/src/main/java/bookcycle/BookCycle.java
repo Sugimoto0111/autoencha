@@ -320,7 +320,7 @@ public final class BookCycle implements ClientModInitializer {
         }
         for (int index = 0; index < Inventory.getSelectionSize(); index++) {
             var stack = current.getInventory().getItem(index);
-            if (stack.is(Items.BOOK) && stack.getCount() == 1) {
+            if (isPlainTargetItem(stack)) {
                 player = current;
                 bookSlot = index;
                 completed = 0;
@@ -435,12 +435,12 @@ public final class BookCycle implements ClientModInitializer {
         activeMenu = menu;
 
         ItemStack heldBook = player.getInventory().getItem(bookSlot);
-        if (heldBook.is(Items.ENCHANTED_BOOK) && heldBook.getCount() == 1) {
+        if (isEnchantedTargetItem(heldBook)) {
             if (menu.getSlot(TABLE_BOOK).hasItem()) {
                 stop("changed");
                 return;
             }
-            LOGGER.warn("Book Cycle found the enchanted book already recovered while the enchanting table was open; resuming at the grindstone");
+            LOGGER.warn("Book Cycle found the enchanted netherite chestplate already recovered while the enchanting table was open; resuming at the grindstone");
             recoveringBook = false;
             recordPhase("OPEN_GRINDSTONE");
             open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE);
@@ -528,8 +528,8 @@ public final class BookCycle implements ClientModInitializer {
             stop("table_occupied");
         } else if (menu.getStateId() != bookMoveState
                 && ItemStack.matches(player.getInventory().getItem(bookSlot), tableBook)) {
-            // A server correction can put the book back after a locally predicted swap.
-            LOGGER.info("Book Cycle is retrying the book move after a correction during {}", step);
+            // A server correction can put the netherite chestplate back after a locally predicted swap.
+            LOGGER.info("Book Cycle is retrying the netherite chestplate move after a correction during {}", step);
             putBookOnTable(client, menu);
         }
         return false;
@@ -849,7 +849,7 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private void takeEnchantedBook(Minecraft client, EnchantmentMenu menu) {
-        if (!menu.getSlot(TABLE_BOOK).getItem().is(Items.ENCHANTED_BOOK)) {
+        if (!isEnchantedTargetItem(menu.getSlot(TABLE_BOOK).getItem())) {
             return;
         }
         if (visibleHit(client, grindstone, Blocks.GRINDSTONE) == null) {
@@ -892,7 +892,7 @@ public final class BookCycle implements ClientModInitializer {
                         && menu.getEnchantmentSeed() == enchantSeed && menu.costs[TARGET_OFFER] >= TARGET_LEVEL
                         && (player.hasInfiniteMaterials() || player.experienceLevel >= menu.costs[TARGET_OFFER]),
                 () -> client.gameMode.handleInventoryButtonClick(menu.containerId, TARGET_OFFER),
-                () -> menu.getSlot(TABLE_BOOK).getItem().is(Items.ENCHANTED_BOOK), () -> {},
+                () -> isEnchantedTargetItem(menu.getSlot(TABLE_BOOK).getItem()), () -> {},
                 retriedEnchant ? null : () -> retryEnchant(client, menu));
     }
 
@@ -901,7 +901,7 @@ public final class BookCycle implements ClientModInitializer {
         if (step == Step.OPEN_TABLE || step == Step.OPEN_GRINDSTONE) {
             if (client.gui.screen() != null || player.containerMenu != player.inventoryMenu) return false;
             ItemStack book = player.getInventory().getItem(bookSlot);
-            if (book.getCount() != 1 || !book.is(step == Step.OPEN_TABLE ? Items.BOOK : Items.ENCHANTED_BOOK)) return false;
+            if (step == Step.OPEN_TABLE ? !isPlainTargetItem(book) : !isEnchantedTargetItem(book)) return false;
             LOGGER.info("Book Cycle retrying {} after no response ({}/{})", step, ++recoveryAttempts, MAX_RECOVERY_ATTEMPTS);
             open(client, step, openingTarget, openingBlock());
         } else if (step == Step.ENCHANT || step == Step.TAKE_ENCHANTED) {
@@ -911,17 +911,16 @@ public final class BookCycle implements ClientModInitializer {
                 open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
             };
             if (ItemStack.matches(input, tableBook) && !tableBook.isEmpty()) {
-                LOGGER.info("Book Cycle recovering the book after {} timed out ({}/{})",
+                LOGGER.info("Book Cycle recovering the netherite chestplate after {} timed out ({}/{})",
                         step, ++recoveryAttempts, MAX_RECOVERY_ATTEMPTS);
                 recoverBook(client, activeMenu, TABLE_BOOK, reopen);
                 return true;
-            } else if (step == Step.TAKE_ENCHANTED && input.is(Items.ENCHANTED_BOOK)) {
+            } else if (step == Step.TAKE_ENCHANTED && isEnchantedTargetItem(input)) {
                 recoveryAttempts++;
                 takeEnchantedBook(client, (EnchantmentMenu) activeMenu);
                 return true;
             } else if (step == Step.TAKE_ENCHANTED && input.isEmpty()
-                    && player.getInventory().getItem(bookSlot).is(Items.ENCHANTED_BOOK)
-                    && player.getInventory().getItem(bookSlot).getCount() == 1) {
+                    && isEnchantedTargetItem(player.getInventory().getItem(bookSlot))) {
                 recoveryAttempts++;
                 open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE);
                 return true;
@@ -938,14 +937,14 @@ public final class BookCycle implements ClientModInitializer {
             Slot input = menu.getSlot(GrindstoneMenu.INPUT_SLOT);
             Slot result = menu.getSlot(GrindstoneMenu.RESULT_SLOT);
             if (!input.hasItem() && !result.hasItem() && held.getCount() == 1) {
-                if (held.is(Items.ENCHANTED_BOOK)) {
+                if (isEnchantedTargetItem(held)) {
                     recoveryAttempts++;
                     open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE);
-                } else if (held.is(Items.BOOK)) {
+                } else if (isPlainTargetItem(held)) {
                     recoveringBook = true;
                     open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
                 } else return false;
-            } else if (input.getItem().is(Items.ENCHANTED_BOOK) && result.getItem().is(Items.BOOK)) {
+            } else if (isEnchantedTargetItem(input.getItem()) && isPlainTargetItem(result.getItem())) {
                 recoveryAttempts++;
                 grind(client, menu);
                 return true;
@@ -965,7 +964,7 @@ public final class BookCycle implements ClientModInitializer {
         GrindstoneMenu menu = screen.getMenu();
         if (!waitForContents(menu)) return;
         var book = player.getInventory().getItem(bookSlot);
-        if (!book.is(Items.ENCHANTED_BOOK) || book.getCount() != 1) return;
+        if (!isEnchantedTargetItem(book)) return;
         if (menu.getSlot(GrindstoneMenu.INPUT_SLOT).hasItem()
                 || menu.getSlot(GrindstoneMenu.ADDITIONAL_SLOT).hasItem()
                 || menu.getSlot(GrindstoneMenu.RESULT_SLOT).hasItem()) {
@@ -979,14 +978,14 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private void grind(Minecraft client, GrindstoneMenu menu) {
-        if (!menu.getSlot(GrindstoneMenu.INPUT_SLOT).getItem().is(Items.ENCHANTED_BOOK)
+        if (!isEnchantedTargetItem(menu.getSlot(GrindstoneMenu.INPUT_SLOT).getItem())
                 || menu.getSlot(GrindstoneMenu.ADDITIONAL_SLOT).hasItem()) {
             stop("changed");
             return;
         }
         var result = menu.getSlot(GrindstoneMenu.RESULT_SLOT).getItem();
         if (result.isEmpty()) return;
-        if (!result.is(Items.BOOK)) {
+        if (!isPlainTargetItem(result)) {
             stop("result");
             return;
         }
@@ -1816,7 +1815,7 @@ public final class BookCycle implements ClientModInitializer {
                 stop("book_space");
                 return;
             }
-            // Direct loot can fill the book's hotbar slot while the book is in a menu.
+            // Direct loot can fill the netherite chestplate's hotbar slot while the netherite chestplate is in a menu.
             for (Slot slot : menu.slots) {
                 if (slot.container == inventory && slot.getContainerSlot() == free) {
                     click(client, menu, slot.index, bookSlot, ContainerInput.SWAP,
@@ -1833,9 +1832,22 @@ public final class BookCycle implements ClientModInitializer {
                 () -> !(menu instanceof GrindstoneMenu) || !menu.getSlot(GrindstoneMenu.INPUT_SLOT).hasItem(), finish);
     }
 
+    private static boolean isTargetItem(ItemStack stack) {
+        return stack.is(Items.NETHERITE_CHESTPLATE) && stack.getCount() == 1;
+    }
+
+    private static boolean isEnchantedTargetItem(ItemStack stack) {
+        if (!isTargetItem(stack)) return false;
+        var enchantments = stack.get(DataComponents.ENCHANTMENTS);
+        return enchantments != null && !enchantments.isEmpty();
+    }
+
+    private static boolean isPlainTargetItem(ItemStack stack) {
+        return isTargetItem(stack) && !isEnchantedTargetItem(stack);
+    }
+
     private boolean isSingleBook() {
-        var book = player.getInventory().getItem(bookSlot);
-        return book.is(Items.BOOK) && book.getCount() == 1;
+        return isPlainTargetItem(player.getInventory().getItem(bookSlot));
     }
 
     private void advance(Step next) {
