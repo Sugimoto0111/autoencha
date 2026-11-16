@@ -1126,7 +1126,7 @@ public final class BookCycle implements ClientModInitializer {
     private static boolean isInstantXpBottle(ItemStack stack) {
         if (!stack.is(Items.EXPERIENCE_BOTTLE) || stack.getComponentsPatch().isEmpty()) return false;
         String name = Normalizer.normalize(stack.getHoverName().getString(), Normalizer.Form.NFKC).strip();
-        return name.matches("^経験値の瓶\\(.+\\)$");
+        return name.matches("^経験値の瓶\\s*\\(.+\\)$");
     }
 
     private int chooseXpBottleHotbarSlot(Inventory inventory, int selectedSlot) {
