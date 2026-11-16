@@ -1197,7 +1197,7 @@ public final class BookCycle implements ClientModInitializer {
                 new Vec3(0, 1, 0),
                 player.getLookAngle().yRot((float) (Math.PI / 2)).multiply(1, 0, 1).normalize(),
                 player.getLookAngle().yRot((float) (-Math.PI / 2)).multiply(1, 0, 1).normalize(),
-                player.getLookAngle().reverse().multiply(1, 0, 1).normalize(),
+                player.getLookAngle().scale(-1).multiply(1, 0, 1).normalize(),
                 new Vec3(0, -1, 0)
         };
 
@@ -1212,8 +1212,8 @@ public final class BookCycle implements ClientModInitializer {
             }
         }
 
-        // If every sampled direction is blocked, look straight up anyway; the direct fallback
-        // below still prevents the XP cycle from stalling indefinitely.
+        // If every sampled direction is blocked, look straight up as the least likely
+        // direction to interact with the enchanting setup.
         player.setXRot(-90.0F);
     }
 
