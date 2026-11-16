@@ -180,6 +180,7 @@ public final class BookCycle implements ClientModInitializer {
     private int xpBottleBeforeLevel;
     private float xpBottleBeforeProgress;
     private boolean xpBottleUseSent;
+    private boolean xpBottleUsedThisWait;
     private long lastFailedXpBottle;
 
     private int tickCounter;
@@ -1006,6 +1007,7 @@ public final class BookCycle implements ClientModInitializer {
 
         if (guardianMode) {
             xpNeeded = TARGET_LEVEL;
+            xpBottleUsedThisWait = false;
             recordPhase("WAIT_FOR_XP");
             closeMenu();
             step = Step.WAIT_FOR_XP;
@@ -1026,6 +1028,7 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         xpNeeded = required;
+        xpBottleUsedThisWait = false;
         xpWaitTicks = 0;
         closeMenu();
         step = Step.WAIT_FOR_XP;
@@ -1085,6 +1088,7 @@ public final class BookCycle implements ClientModInitializer {
 
     private boolean tryUseInstantXpBottle(Minecraft client) {
         if (!guardianMode || step != Step.WAIT_FOR_XP || player.experienceLevel >= xpNeeded
+                || xpBottleUsedThisWait
                 || (lastFailedXpBottle != 0
                 && System.nanoTime() - lastFailedXpBottle < XP_BOTTLE_RETRY_DELAY)) return false;
 
@@ -1173,6 +1177,7 @@ public final class BookCycle implements ClientModInitializer {
                     || (player.experienceLevel == xpBottleBeforeLevel
                     && player.experienceProgress > xpBottleBeforeProgress + 0.0001F);
             if (consumed || gainedXp) {
+                xpBottleUsedThisWait = true;
                 finishXpBottle();
             }
             return;
@@ -1859,6 +1864,7 @@ public final class BookCycle implements ClientModInitializer {
         xpBottleBeforeLevel = 0;
         xpBottleBeforeProgress = 0;
         xpBottleUseSent = false;
+        xpBottleUsedThisWait = false;
         lastFailedXpBottle = 0;
         activeMenu = null;
         menuAction = null;
