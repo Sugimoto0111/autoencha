@@ -1182,8 +1182,9 @@ public final class BookCycle implements ClientModInitializer {
             failXpBottle(client, "custom bottle missing");
             return;
         }
-        client.gameMode.useItem(player, InteractionHand.MAIN_HAND);
-        player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
+        // Queue one real use-key click instead of calling gameMode.useItem directly.
+        // This follows Minecraft's normal right-click path, including block/entity context.
+        KeyMapping.click(client.options.keyUse.getKey());
         xpBottleUseSent = true;
         ticksLeft = TIMEOUT_TICKS;
     }
