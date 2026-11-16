@@ -89,6 +89,7 @@ public final class BookCycle implements ClientModInitializer {
     private static final int LOW_FREE_SLOTS = 4;
     private static final int LOOT_CRAFT_RETRY_TICKS = 20;
     private static final int XP_WAIT_WARN_TICKS = 200;
+    private static final long XP_BOTTLE_RETRY_DELAY = TimeUnit.SECONDS.toNanos(5);
     private static final int TABLE_BOOK = 0;
     private static final int TABLE_LAPIS = 1;
     private static final int TARGET_OFFER = 2;
@@ -119,7 +120,7 @@ public final class BookCycle implements ClientModInitializer {
     private enum Step {
         OPEN_TABLE, ENCHANT, TAKE_ENCHANTED, OPEN_GRINDSTONE, GRIND,
         OPEN_BARREL, TAKE_SUPPLIES, CRAFT_LAPIS, OPEN_CRAFTING_TABLE, CRAFT_LOOT, WAIT_FOR_XP, SWING,
-        PREPARE_FOOD, EAT, RESTORE_FOOD
+        PREPARE_XP_BOTTLE, USE_XP_BOTTLE, PREPARE_FOOD, EAT, RESTORE_FOOD
     }
 
     private ClientLevel level;
@@ -173,6 +174,13 @@ public final class BookCycle implements ClientModInitializer {
     private InteractionHand foodHand;
     private ItemStack eatingStack = ItemStack.EMPTY;
     private long lastFailedMeal;
+    private int selectedBeforeXpBottle = -1;
+    private int xpBottleHotbarSlot = -1;
+    private int xpBottleBeforeCount;
+    private int xpBottleBeforeLevel;
+    private float xpBottleBeforeProgress;
+    private boolean xpBottleUseSent;
+    private long lastFailedXpBottle;
 
     private int tickCounter;
     private int cycleStartTick;
@@ -371,6 +379,8 @@ public final class BookCycle implements ClientModInitializer {
                 lootCleanupOnly = false;
                 message(player, "loot_craft_skipped");
                 open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+            } else if (step == Step.PREPARE_XP_BOTTLE || step == Step.USE_XP_BOTTLE) {
+                failXpBottle(client, "timeout");
             } else if (step == Step.PREPARE_FOOD || step == Step.EAT || step == Step.RESTORE_FOOD) {
                 failMeal(client, "timeout");
             } else if (!recoverAfterTimeout(client)) {
@@ -406,6 +416,8 @@ public final class BookCycle implements ClientModInitializer {
             case OPEN_CRAFTING_TABLE -> loadCraftingTable(client);
             case CRAFT_LOOT -> craftLoot(client, (CraftingMenu) activeMenu);
             case WAIT_FOR_XP, SWING -> tickXpFarm(client);
+            case PREPARE_XP_BOTTLE -> failXpBottle(client, "prepare state lost");
+            case USE_XP_BOTTLE -> tickXpBottle(client);
             case PREPARE_FOOD, RESTORE_FOOD -> stop("food_sync");
             case EAT -> tickEating(client);
         }
@@ -1032,6 +1044,7 @@ public final class BookCycle implements ClientModInitializer {
                         xpWaitTicks, player.experienceLevel, xpNeeded);
             }
             if (tryEat(client)) return;
+            if (player.experienceLevel < xpNeeded && tryUseInstantXpBottle(client)) return;
         }
         if (!player.getMainHandItem().is(ItemTags.SWORDS)) {
             int swordSlot = findHotbarSword();
@@ -1068,6 +1081,132 @@ public final class BookCycle implements ClientModInitializer {
             xpWaitTicks = 0;
             startNextCycle(client);
         }
+    }
+
+    private boolean tryUseInstantXpBottle(Minecraft client) {
+        if (!guardianMode || step != Step.WAIT_FOR_XP || player.experienceLevel >= xpNeeded
+                || (lastFailedXpBottle != 0
+                && System.nanoTime() - lastFailedXpBottle < XP_BOTTLE_RETRY_DELAY)) return false;
+
+        Inventory inventory = player.getInventory();
+        int source = -1;
+        for (int slot = 0; slot < Inventory.INVENTORY_SIZE; slot++) {
+            if (isInstantXpBottle(inventory.getItem(slot))) {
+                source = slot;
+                if (Inventory.isHotbarSlot(slot)) break;
+            }
+        }
+        if (source < 0) return false;
+
+        selectedBeforeXpBottle = inventory.getSelectedSlot();
+        if (Inventory.isHotbarSlot(source)) {
+            xpBottleHotbarSlot = source;
+            inventory.setSelectedSlot(source);
+            prepareXpBottle();
+            return true;
+        }
+
+        xpBottleHotbarSlot = chooseXpBottleHotbarSlot(inventory, selectedBeforeXpBottle);
+        if (xpBottleHotbarSlot < 0) {
+            selectedBeforeXpBottle = -1;
+            return false;
+        }
+
+        closeMenu();
+        InventoryMenu menu = player.inventoryMenu;
+        advance(Step.PREPARE_XP_BOTTLE);
+        click(client, menu, InventoryMenu.INV_SLOT_START + source - Inventory.getSelectionSize(),
+                xpBottleHotbarSlot, ContainerInput.SWAP, () -> true, () -> {
+                    inventory.setSelectedSlot(xpBottleHotbarSlot);
+                    prepareXpBottle();
+                });
+        return true;
+    }
+
+    private static boolean isInstantXpBottle(ItemStack stack) {
+        if (!stack.is(Items.EXPERIENCE_BOTTLE) || stack.getComponentsPatch().isEmpty()) return false;
+        String name = Normalizer.normalize(stack.getHoverName().getString(), Normalizer.Form.NFKC).strip();
+        return name.matches("^経験値の瓶\\(.+\\)$");
+    }
+
+    private int chooseXpBottleHotbarSlot(Inventory inventory, int selectedSlot) {
+        int nonFood = -1;
+        int fallback = -1;
+        for (int slot = 0; slot < Inventory.getSelectionSize(); slot++) {
+            if (slot == selectedSlot || slot == bookSlot || inventory.getItem(slot).is(ItemTags.SWORDS)) continue;
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.isEmpty()) return slot;
+            if (fallback < 0) fallback = slot;
+            if (nonFood < 0 && !safeFood(stack)) nonFood = slot;
+        }
+        return nonFood >= 0 ? nonFood : fallback;
+    }
+
+    private void prepareXpBottle() {
+        ItemStack held = player.getInventory().getItem(xpBottleHotbarSlot);
+        if (!isInstantXpBottle(held)) {
+            failXpBottle(Minecraft.getInstance(), "custom bottle missing");
+            return;
+        }
+        xpBottleBeforeCount = held.getCount();
+        xpBottleBeforeLevel = player.experienceLevel;
+        xpBottleBeforeProgress = player.experienceProgress;
+        xpBottleUseSent = false;
+        advance(Step.USE_XP_BOTTLE);
+        actionDelay = Math.max(actionDelay, OPEN_DELAY_TICKS);
+    }
+
+    private void tickXpBottle(Minecraft client) {
+        if (client.gui.screen() != null || player.containerMenu != player.inventoryMenu) {
+            failXpBottle(client, "inventory changed");
+            return;
+        }
+        if (player.getInventory().getSelectedSlot() != xpBottleHotbarSlot) {
+            player.getInventory().setSelectedSlot(xpBottleHotbarSlot);
+            return;
+        }
+
+        ItemStack held = player.getInventory().getItem(xpBottleHotbarSlot);
+        if (xpBottleUseSent) {
+            boolean consumed = held.getCount() < xpBottleBeforeCount || !isInstantXpBottle(held);
+            boolean gainedXp = player.experienceLevel > xpBottleBeforeLevel
+                    || (player.experienceLevel == xpBottleBeforeLevel
+                    && player.experienceProgress > xpBottleBeforeProgress + 0.0001F);
+            if (consumed || gainedXp) {
+                finishXpBottle();
+            }
+            return;
+        }
+
+        if (!isInstantXpBottle(held)) {
+            failXpBottle(client, "custom bottle missing");
+            return;
+        }
+        client.gameMode.useItem(player, InteractionHand.MAIN_HAND);
+        player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
+        xpBottleUseSent = true;
+        ticksLeft = TIMEOUT_TICKS;
+    }
+
+    private void finishXpBottle() {
+        int restoreSlot = selectedBeforeXpBottle;
+        if (restoreSlot < 0 || !player.getInventory().getItem(restoreSlot).is(ItemTags.SWORDS)) {
+            int swordSlot = findHotbarSword();
+            if (swordSlot >= 0) restoreSlot = swordSlot;
+        }
+        if (restoreSlot >= 0) player.getInventory().setSelectedSlot(restoreSlot);
+
+        selectedBeforeXpBottle = -1;
+        xpBottleHotbarSlot = -1;
+        xpBottleUseSent = false;
+        step = Step.WAIT_FOR_XP;
+        actionDelay = Math.max(actionDelay, OPEN_DELAY_TICKS);
+    }
+
+    private void failXpBottle(Minecraft client, String reason) {
+        LOGGER.warn("Book Cycle instant XP bottle attempt failed ({}); falling back to XP mobs", reason);
+        lastFailedXpBottle = System.nanoTime();
+        finishXpBottle();
     }
 
     private static boolean safeFood(ItemStack stack) {
@@ -1560,11 +1699,12 @@ public final class BookCycle implements ClientModInitializer {
 
     private boolean processMenuAction(Minecraft client) {
         MenuAction action = menuAction;
-        boolean foodSwap = (step == Step.PREPARE_FOOD || step == Step.RESTORE_FOOD)
+        boolean inventorySwap = (step == Step.PREPARE_FOOD || step == Step.RESTORE_FOOD
+                || step == Step.PREPARE_XP_BOTTLE)
                 && client.gui.screen() == null && action.menu() == player.inventoryMenu;
         boolean matchingScreen = client.gui.screen() instanceof AbstractContainerScreen<?> screen
                 && screen.getMenu() == action.menu();
-        if (player.containerMenu != action.menu() || !(matchingScreen || foodSwap)) {
+        if (player.containerMenu != action.menu() || !(matchingScreen || inventorySwap)) {
             stop("stopped");
             return false;
         }
@@ -1684,6 +1824,13 @@ public final class BookCycle implements ClientModInitializer {
         selectedBeforeEating = -1;
         mealResumeStep = null;
         lastFailedMeal = 0;
+        selectedBeforeXpBottle = -1;
+        xpBottleHotbarSlot = -1;
+        xpBottleBeforeCount = 0;
+        xpBottleBeforeLevel = 0;
+        xpBottleBeforeProgress = 0;
+        xpBottleUseSent = false;
+        lastFailedXpBottle = 0;
         activeMenu = null;
         menuAction = null;
         pendingUse = null;
