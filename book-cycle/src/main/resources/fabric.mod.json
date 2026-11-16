@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "book_cycle",
-  "version": "1.7.3",
+  "version": "2.0",
   "name": "Book Cycle",
   "description": "Cycles a single book between an enchanting table and a grindstone.",
   "environment": "client",

@@ -1,7 +1,7 @@
 param(
     [string]$Prism = (Join-Path $env:APPDATA 'PrismLauncher'),
     [string]$Instance = '1.21.11',
-    [string]$Destination = (Join-Path $PSScriptRoot 'build/book-cycle-1.7.3+26.3.jar'),
+    [string]$Destination = (Join-Path $PSScriptRoot 'build/book-cycle-2.0+26.3.jar'),
     [switch]$Check
 )
 

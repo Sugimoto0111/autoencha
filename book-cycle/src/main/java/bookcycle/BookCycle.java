@@ -1187,7 +1187,7 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         aimAtAirForUse(client);
-        KeyMapping.click(client.options.keyUse.getKey());
+        KeyMapping.click(KeyMappingHelper.getBoundKeyOf(client.options.keyUse));
         xpBottleUseSent = true;
         ticksLeft = TIMEOUT_TICKS;
     }
