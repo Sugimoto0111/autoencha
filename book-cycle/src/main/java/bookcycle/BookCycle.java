@@ -1182,10 +1182,39 @@ public final class BookCycle implements ClientModInitializer {
             failXpBottle(client, "custom bottle missing");
             return;
         }
-        client.gameMode.useItem(player, InteractionHand.MAIN_HAND);
-        player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
+        aimAtAirForUse(client);
+        KeyMapping.click(client.options.keyUse.getKey());
         xpBottleUseSent = true;
         ticksLeft = TIMEOUT_TICKS;
+    }
+
+    private void aimAtAirForUse(Minecraft client) {
+        Vec3 eye = player.getEyePosition();
+        double range = Math.max(4.5, player.blockInteractionRange() + 1.0);
+
+        // Prefer directions that are unlikely to hit the enchanting setup.
+        Vec3[] directions = {
+                new Vec3(0, 1, 0),
+                player.getLookAngle().yRot((float) (Math.PI / 2)).multiply(1, 0, 1).normalize(),
+                player.getLookAngle().yRot((float) (-Math.PI / 2)).multiply(1, 0, 1).normalize(),
+                player.getLookAngle().reverse().multiply(1, 0, 1).normalize(),
+                new Vec3(0, -1, 0)
+        };
+
+        for (Vec3 direction : directions) {
+            if (direction.lengthSqr() < 0.001) continue;
+            Vec3 end = eye.add(direction.normalize().scale(range));
+            BlockHitResult hit = client.level.clip(new ClipContext(
+                    eye, end, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+            if (hit.getType() == HitResult.Type.MISS) {
+                player.lookAt(EntityAnchorArgument.Anchor.EYES, end);
+                return;
+            }
+        }
+
+        // If every sampled direction is blocked, look straight up anyway; the direct fallback
+        // below still prevents the XP cycle from stalling indefinitely.
+        player.setXRot(-90.0F);
     }
 
     private void finishXpBottle() {
