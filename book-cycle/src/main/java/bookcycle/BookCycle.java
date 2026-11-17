@@ -20,19 +20,28 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.ConnectScreen;
+import net.minecraft.client.gui.screens.DisconnectedScreen;
+import net.minecraft.client.gui.screens.LevelLoadingScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.inventory.ContainerScreen;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.inventory.CraftingScreen;
 import net.minecraft.client.gui.screens.inventory.EnchantmentScreen;
 import net.minecraft.client.gui.screens.inventory.GrindstoneScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.client.multiplayer.resolver.ServerAddress;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.tags.EnchantmentTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityTypes;
@@ -57,6 +66,7 @@ import net.minecraft.world.item.crafting.display.RecipeDisplayId;
 import net.minecraft.world.item.crafting.display.ShapedCraftingRecipeDisplay;
 import net.minecraft.world.item.crafting.display.SlotDisplayContext;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.AABB;
@@ -96,9 +106,13 @@ public final class BookCycle implements ClientModInitializer {
     private static final int TARGET_OFFER = 2;
     private static final int TARGET_LEVEL = 30;
     private static final int TARGET_LAPIS = TARGET_OFFER + 1;
+    private static final int LAPIS_REFILL_TARGET = 64;
     private static final double[] AIM_FRACTIONS = {0.5, 0.08, 0.92};
     private static final int ENTITY_AIM_GRID = 9;
     private static final long EAT_RETRY_DELAY = TimeUnit.SECONDS.toNanos(5);
+    private static final long RECONNECT_DELAY = TimeUnit.SECONDS.toNanos(10);
+    private static final long RESUME_TIMEOUT = TimeUnit.SECONDS.toNanos(10);
+    private static final int MAX_RECONNECT_ATTEMPTS = 30;
     private static final List<String> ROMAN_TIERS = List.of("", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX");
     private static final Pattern COMPRESSED_LAPIS = Pattern.compile(
             "(?:多重)?圧縮ラピスラズリブロック\\s+([IVX]+)(?:\\s*\\([0-9,]+個分\\))?");
@@ -121,7 +135,7 @@ public final class BookCycle implements ClientModInitializer {
     private enum Step {
         OPEN_TABLE, ENCHANT, TAKE_ENCHANTED, OPEN_GRINDSTONE, GRIND,
         OPEN_BARREL, TAKE_SUPPLIES, CRAFT_LAPIS, OPEN_CRAFTING_TABLE, CRAFT_LOOT, ARMOR_STAND, WAIT_FOR_XP, SWING,
-        PREPARE_XP_BOTTLE, USE_XP_BOTTLE, PREPARE_FOOD, EAT, RESTORE_FOOD
+        PREPARE_XP_BOTTLE, USE_XP_BOTTLE, PREPARE_FOOD, EAT, RESTORE_FOOD, PREPARE_CYCLE_ITEMS
     }
 
     private ClientLevel level;
@@ -145,6 +159,18 @@ public final class BookCycle implements ClientModInitializer {
     private int extraDelayTicks;
     private int afterAttackDelayTicks;
     private boolean showControls;
+    private boolean autoReconnect;
+    private ServerData cycleServer;
+    private ItemStack cycleItem = ItemStack.EMPTY;
+    private boolean initialDisenchant;
+    private record ReconnectCycle(ServerData server, ResourceKey<Level> dimension, BlockPos table,
+                                  BlockPos grindstone, boolean guardians, int hotbarSlot,
+                                  ItemStack item, int completed, boolean initialDisenchant) {}
+    private ReconnectCycle reconnectCycle;
+    private DisconnectedScreen retryScreen;
+    private int reconnectAttempts;
+    private long reconnectAt;
+    private long resumeDeadline;
     private record MenuAction(AbstractContainerMenu menu, BooleanSupplier ready, Runnable send,
                               BooleanSupplier confirmed, Runnable finish, Runnable retry) {}
     private MenuAction menuAction;
@@ -158,8 +184,8 @@ public final class BookCycle implements ClientModInitializer {
     private Vec3 aimedXpPoint;
     private boolean nextXpTargetGuardian;
     private int craftTier;
-    private ItemStack expectedSupply = ItemStack.EMPTY;
-    private int countBeforeCraft;
+    private boolean bulkLapisInput;
+    private int expectedLapisCount = -1;
     private LootRecipe lootRecipe;
     private boolean takingLootResult;
     private boolean skipLootCrafting;
@@ -210,8 +236,21 @@ public final class BookCycle implements ClientModInitializer {
         });
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (level != client.level) {
+                if (step != null && autoReconnect && cycleServer != null && !cycleServer.isRealm()
+                        && player.isAlive() && client.level == null
+                        && client.gui.screen() instanceof DisconnectedScreen) {
+                    reconnectCycle = new ReconnectCycle(cycleServer, level.dimension(), table, grindstone,
+                            guardianMode, bookSlot, cycleItem, completed, initialDisenchant);
+                    retryScreen = null;
+                    reconnectAttempts = 0;
+                    resumeDeadline = 0;
+                }
                 level = client.level;
                 reset();
+            }
+            if (reconnectCycle != null) {
+                tickReconnect(client);
+                return;
             }
             if (consumeClicks(controls) && client.player != null && client.gui.screen() == null) showControls = true;
             if (showControls && step != Step.EAT && client.player != null && client.gui.screen() == null
@@ -258,6 +297,10 @@ public final class BookCycle implements ClientModInitializer {
             }).bounds(x, y + 78, 106, 20).build());
             addRenderableWidget(Button.builder(Component.translatable("gui.done"), button -> onClose())
                     .bounds(x + 114, y + 78, 106, 20).build());
+            addRenderableWidget(Button.builder(reconnectLabel(), button -> {
+                autoReconnect = !autoReconnect;
+                button.setMessage(reconnectLabel());
+            }).bounds(x, y + 104, 220, 20).build());
             normal.active = guardians.active = step == null && minecraft.player != null;
             stopButton.active = step != null;
         }
@@ -297,6 +340,11 @@ public final class BookCycle implements ClientModInitializer {
         }
     }
 
+    private Component reconnectLabel() {
+        return Component.translatable("book_cycle.reconnect_toggle",
+                Component.translatable(autoReconnect ? "options.on" : "options.off"));
+    }
+
     private static boolean consumeClicks(KeyMapping key) {
         boolean pressed = false;
         while (key.consumeClick()) pressed = true;
@@ -309,8 +357,8 @@ public final class BookCycle implements ClientModInitializer {
             message(current, "stance");
             return;
         }
-        if (withGuardians && !current.getMainHandItem().is(ItemTags.SWORDS)) {
-            message(current, "sword");
+        if (current.containerMenu != current.inventoryMenu || !current.inventoryMenu.getCarried().isEmpty()) {
+            message(current, "cursor_occupied");
             return;
         }
         table = nearestVisible(client, Blocks.ENCHANTING_TABLE);
@@ -319,32 +367,193 @@ public final class BookCycle implements ClientModInitializer {
             message(current, "reach");
             return;
         }
-        for (int index = 0; index < Inventory.getSelectionSize(); index++) {
-            var stack = current.getInventory().getItem(index);
+        Inventory inventory = current.getInventory();
+        int source = -1;
+        boolean cursed = false;
+        for (int index = 0; index < Inventory.INVENTORY_SIZE; index++) {
+            ItemStack stack = inventory.getItem(index);
+            if (!isTargetItem(stack)) continue;
             if (isPlainTargetItem(stack)) {
-                player = current;
-                bookSlot = index;
-                completed = 0;
-                recoveryAttempts = 0;
-                recoveringBook = false;
-                skipLootCrafting = false;
-                lootCraftRetryAtTick = 0;
-                lootCleanupOnly = false;
-                xpWaitTicks = 0;
-                warnedNoCraftingTable = false;
-                guardianMode = withGuardians;
-                xpNeeded = withGuardians ? TARGET_LEVEL : 1;
-                nextXpTargetGuardian = true;
-                tickCounter = 0;
-                recentCycleTicks.clear();
-                currentPhaseTicks.clear();
-                currentPhase = null;
-                startNextCycle(client);
-                message(current, withGuardians ? "guardian_started" : "started");
-                return;
+                source = index;
+                break;
+            }
+            if (stack.get(DataComponents.ENCHANTMENTS).keySet().stream().anyMatch(e -> e.is(EnchantmentTags.CURSE))) {
+                cursed = true;
+            } else if (source < 0) {
+                source = index;
             }
         }
-        message(current, "book");
+        if (source < 0) {
+            message(current, cursed ? "cursed_item" : "book");
+            return;
+        }
+        ItemStack stack = inventory.getItem(source);
+        initialDisenchant = isEnchantedTargetItem(stack);
+        ItemStack item = findCycleItem(inventory, stack) == source ? stack.copy() : ItemStack.EMPTY;
+        prepareItems(client, withGuardians, source, -1, item, 0, withGuardians ? "guardian_started" : "started");
+    }
+
+    private void prepareCycle(Minecraft client, boolean withGuardians, int slot, ItemStack item, int count) {
+        player = client.player;
+        cycleServer = client.getCurrentServer();
+        cycleItem = item;
+        bookSlot = slot;
+        completed = count;
+        recoveryAttempts = 0;
+        recoveringBook = false;
+        skipLootCrafting = false;
+        lootCraftRetryAtTick = 0;
+        lootCleanupOnly = false;
+        xpWaitTicks = 0;
+        warnedNoCraftingTable = false;
+        guardianMode = withGuardians;
+        xpNeeded = withGuardians ? TARGET_LEVEL : 1;
+        nextXpTargetGuardian = true;
+        tickCounter = 0;
+        recentCycleTicks.clear();
+        currentPhaseTicks.clear();
+        currentPhase = null;
+    }
+
+    private void tickReconnect(Minecraft client) {
+        ReconnectCycle saved = reconnectCycle;
+        Screen screen = client.gui.screen();
+        long now = System.nanoTime();
+        if (screen instanceof DisconnectedScreen disconnected && client.level == null) {
+            if (disconnected != retryScreen) {
+                retryScreen = disconnected;
+                reconnectAt = now + RECONNECT_DELAY;
+                resumeDeadline = 0;
+            }
+            if (now - reconnectAt < 0) return;
+            if (reconnectAttempts == MAX_RECONNECT_ATTEMPTS) {
+                reconnectCycle = null;
+                retryScreen = null;
+                LOGGER.info("Book Cycle stopped trying to reconnect after {} attempts", reconnectAttempts);
+                return;
+            }
+            LOGGER.info("Book Cycle reconnect attempt {}/{}", ++reconnectAttempts, MAX_RECONNECT_ATTEMPTS);
+            Screen serverList = new JoinMultiplayerScreen(new TitleScreen());
+            ConnectScreen.startConnecting(serverList, client, ServerAddress.parseString(saved.server().ip),
+                    saved.server(), false, null);
+            return;
+        }
+        if (screen instanceof ConnectScreen || screen instanceof LevelLoadingScreen) return;
+        ServerData server = client.getCurrentServer();
+        if (client.level == null || client.player == null || server == null || !server.ip.equals(saved.server().ip)) {
+            // Leaving the disconnect screen or cancelling vanilla's connection discards the pending run.
+            LOGGER.info("Book Cycle cancelled its pending reconnect on {}",
+                    screen == null ? "no screen" : screen.getClass().getSimpleName());
+            reconnectCycle = null;
+            retryScreen = null;
+            return;
+        }
+
+        if (resumeDeadline == 0) resumeDeadline = now + RESUME_TIMEOUT;
+        LocalPlayer current = client.player;
+        boolean ready = screen == null && client.gameMode != null && current.isAlive() && !current.isSpectator()
+                && !current.isShiftKeyDown() && client.getCameraEntity() == current
+                && current.containerMenu == current.inventoryMenu && current.inventoryMenu.getCarried().isEmpty()
+                && client.level.dimension().equals(saved.dimension())
+                && visibleHit(client, saved.table(), Blocks.ENCHANTING_TABLE) != null
+                && visibleHit(client, saved.grindstone(), Blocks.GRINDSTONE) != null;
+        int source = ready ? findCycleItem(current.getInventory(), saved.item()) : -1;
+        if (source < 0 && now - resumeDeadline < 0) return;
+        reconnectCycle = null;
+        retryScreen = null;
+        if (source < 0) {
+            String reason = ready ? "reconnect_item" : "reconnect_context";
+            LOGGER.info("Book Cycle could not resume after reconnecting ({})", reason);
+            message(current, reason);
+            return;
+        }
+        resumeCycle(client, saved, source);
+    }
+
+    static int findCycleItem(Inventory inventory, ItemStack expected) {
+        if (expected.isEmpty()) return -1;
+        int match = -1;
+        var expectedPatch = expected.getComponentsPatch().forget(type -> type == DataComponents.ENCHANTMENTS);
+        for (int index = 0; index < Inventory.INVENTORY_SIZE; index++) {
+            ItemStack stack = inventory.getItem(index);
+            if (!isTargetItem(stack)) continue;
+            // The server can bind new item defaults when the client joins again.
+            if (!stack.getComponentsPatch().forget(type -> type == DataComponents.ENCHANTMENTS).equals(expectedPatch)) {
+                continue;
+            }
+            if (match >= 0) return -1;
+            match = index;
+        }
+        return match;
+    }
+
+    private void resumeCycle(Minecraft client, ReconnectCycle saved, int source) {
+        table = saved.table();
+        grindstone = saved.grindstone();
+        initialDisenchant = saved.initialDisenchant()
+                && isEnchantedTargetItem(client.player.getInventory().getItem(source));
+        prepareItems(client, saved.guardians(), source, saved.hotbarSlot(), saved.item(), saved.completed(),
+                "reconnect_resumed");
+    }
+
+    private void prepareItems(Minecraft client, boolean withGuardians, int source, int preferred,
+                              ItemStack item, int count, String status) {
+        Inventory inventory = client.player.getInventory();
+        int sword = -1;
+        if (withGuardians) {
+            sword = inventory.getSelectedSlot();
+            if (!inventory.getItem(sword).is(ItemTags.SWORDS)) {
+                sword = 0;
+                while (sword < Inventory.INVENTORY_SIZE && !inventory.getItem(sword).is(ItemTags.SWORDS)) sword++;
+                if (sword == Inventory.INVENTORY_SIZE) {
+                    message(client.player, "sword");
+                    return;
+                }
+            }
+        }
+        int chestDestination = source < Inventory.getSelectionSize() ? source
+                : preparationHotbarSlot(inventory, preferred, sword >= 0 && sword < Inventory.getSelectionSize()
+                        ? sword : inventory.getSelectedSlot());
+        int swordSource = sword;
+        int swordDestination = sword < Inventory.getSelectionSize() ? sword
+                : preparationHotbarSlot(inventory, inventory.getSelectedSlot(), chestDestination);
+        prepareCycle(client, withGuardians, chestDestination, item, count);
+        advance(Step.PREPARE_CYCLE_ITEMS);
+        moveToHotbar(client, source, chestDestination, () -> {
+            Runnable begin = () -> {
+                if (swordDestination >= 0) inventory.setSelectedSlot(swordDestination);
+                beginWithItem(client, status);
+            };
+            if (swordSource >= 0) moveToHotbar(client, swordSource, swordDestination, begin);
+            else begin.run();
+        });
+    }
+
+    private static int preparationHotbarSlot(Inventory inventory, int preferred, int protectedSlot) {
+        if (preferred >= 0 && preferred != protectedSlot && inventory.getItem(preferred).isEmpty()) return preferred;
+        for (int slot = 0; slot < Inventory.getSelectionSize(); slot++) {
+            if (slot != protectedSlot && inventory.getItem(slot).isEmpty()) return slot;
+        }
+        return preferred >= 0 && preferred != protectedSlot ? preferred : protectedSlot == 0 ? 1 : 0;
+    }
+
+    private void moveToHotbar(Minecraft client, int source, int destination, Runnable finish) {
+        if (source == destination) {
+            finish.run();
+            return;
+        }
+        click(client, player.inventoryMenu, InventoryMenu.INV_SLOT_START + source - Inventory.getSelectionSize(),
+                destination, ContainerInput.SWAP, () -> true, finish);
+    }
+
+    private void beginWithItem(Minecraft client, String status) {
+        if (isEnchantedTargetItem(player.getInventory().getItem(bookSlot))) {
+            beginCycleTiming("OPEN_GRINDSTONE");
+            if (!open(client, Step.OPEN_GRINDSTONE, grindstone, Blocks.GRINDSTONE)) return;
+        } else {
+            startNextCycle(client);
+        }
+        if (step != null) message(player, status);
     }
 
     private void tick(Minecraft client) {
@@ -391,6 +600,7 @@ public final class BookCycle implements ClientModInitializer {
                 stop(switch (step) {
                     case ENCHANT -> hasLapis(activeMenu) ? "timeout" : "lapis_sync_timeout";
                     case TAKE_ENCHANTED -> "enchant_timeout";
+                    case PREPARE_CYCLE_ITEMS -> "prepare_items";
                     default -> "timeout";
                 });
             }
@@ -424,6 +634,7 @@ public final class BookCycle implements ClientModInitializer {
             case PREPARE_XP_BOTTLE -> failXpBottle(client, "prepare state lost");
             case USE_XP_BOTTLE -> tickXpBottle(client);
             case PREPARE_FOOD, RESTORE_FOOD -> stop("food_sync");
+            case PREPARE_CYCLE_ITEMS -> stop("prepare_items");
             case EAT -> tickEating(client);
         }
         if (menuAction != null && !actionSent && actionDelay == 0) processMenuAction(client);
@@ -452,7 +663,8 @@ public final class BookCycle implements ClientModInitializer {
         }
 
         if (recoveringBook && isSingleBook()) {
-            completed++;
+            if (!initialDisenchant) completed++;
+            initialDisenchant = false;
             recoveryAttempts = 0;
             recoveringBook = false;
         }
@@ -461,14 +673,13 @@ public final class BookCycle implements ClientModInitializer {
             stop("changed");
             return;
         }
-        if (!expectedSupply.isEmpty()) {
-            int received = countMatching(menu, expectedSupply, TABLE_LAPIS + 1, menu.slots.size()) - countBeforeCraft;
-            if (received != expectedSupply.getCount()) {
+        if (expectedLapisCount >= 0) {
+            if (countPlainItem(menu, Items.LAPIS_LAZULI, TABLE_LAPIS + 1, menu.slots.size()) != expectedLapisCount) {
                 closeMenu();
                 stop("craft_result");
                 return;
             }
-            expectedSupply = ItemStack.EMPTY;
+            expectedLapisCount = -1;
         }
         if (showControls) {
             closeMenu();
@@ -1002,11 +1213,19 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private void completeCycle(Minecraft client) {
-        completed++;
         recoveryAttempts = 0;
         recoveringBook = false;
-        finishCycleMetrics();
         closeMenu();
+        if (initialDisenchant) {
+            initialDisenchant = false;
+            Inventory inventory = player.getInventory();
+            ItemStack stack = inventory.getItem(bookSlot);
+            cycleItem = findCycleItem(inventory, stack) == bookSlot ? stack.copy() : ItemStack.EMPTY;
+            startNextCycle(client);
+            return;
+        }
+        completed++;
+        finishCycleMetrics();
 
         if (guardianMode) {
             xpNeeded = TARGET_LEVEL;
@@ -1238,7 +1457,7 @@ public final class BookCycle implements ClientModInitializer {
             return;
         }
         aimAtAirForUse(client);
-        KeyMapping.click(client.options.keyUse.getKey());
+        KeyMapping.click(KeyMappingHelper.getBoundKeyOf(client.options.keyUse));
         xpBottleUseSent = true;
         ticksLeft = TIMEOUT_TICKS;
     }
@@ -1593,14 +1812,8 @@ public final class BookCycle implements ClientModInitializer {
 
     private void startCraft(Minecraft client) {
         InventoryMenu menu = player.inventoryMenu;
-        int source = findLapisBlock(menu, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END);
-        if (source < 0 || !isSingleBook()) {
+        if (!isSingleBook()) {
             stop("changed");
-            return;
-        }
-        if (player.getInventory().getFreeSlot() < 0 && menu.getSlot(source).getItem().getCount() != 1) {
-            closeMenu();
-            stop("inventory_full");
             return;
         }
         closeMenu();
@@ -1610,9 +1823,43 @@ public final class BookCycle implements ClientModInitializer {
         }
         client.gui.setScreen(new InventoryScreen(player));
         activeMenu = menu;
-        craftTier = lapisBlockTier(menu.getSlot(source).getItem());
-        pickIngredient(client, menu, source);
         advance(Step.CRAFT_LAPIS);
+        nextLapisIngredient(client, menu);
+    }
+
+    private void nextLapisIngredient(Minecraft client, InventoryMenu menu) {
+        int lapis = countPlainItem(menu, Items.LAPIS_LAZULI, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END);
+        int source = findLapisBlock(menu, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END);
+        if (lapis >= LAPIS_REFILL_TARGET || (source < 0 && lapis >= TARGET_LAPIS)) {
+            finishLapisCraft(client, lapis);
+        } else if (source < 0) {
+            closeMenu();
+            stop("craft_result");
+        } else {
+            ItemStack ingredient = menu.getSlot(source).getItem();
+            craftTier = lapisBlockTier(ingredient);
+            ItemStack lapisStack = new ItemStack(Items.LAPIS_LAZULI);
+            bulkLapisInput = craftTier == 0 && ingredient.getCount() > 1
+                    && lapisOutputSpace(menu, lapisStack) + lapisStack.getMaxStackSize() >= ingredient.getCount() * 9;
+            pickIngredient(client, menu, source);
+        }
+    }
+
+    private void finishLapisCraft(Minecraft client, int lapis) {
+        expectedLapisCount = lapis;
+        open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+    }
+
+    private static int lapisOutputSpace(InventoryMenu menu, ItemStack output) {
+        int available = 0;
+        for (int index = InventoryMenu.INV_SLOT_START; index < InventoryMenu.USE_ROW_SLOT_END; index++) {
+            Slot slot = menu.getSlot(index);
+            ItemStack stored = slot.getItem();
+            if (stored.isEmpty() || ItemStack.isSameItemSameComponents(stored, output)) {
+                available += slot.getMaxStackSize(output) - stored.getCount();
+            }
+        }
+        return available;
     }
 
     private void craftLapis(Minecraft client, InventoryMenu menu) {
@@ -1624,7 +1871,7 @@ public final class BookCycle implements ClientModInitializer {
         Slot input = grid.getFirst();
         if (!input.hasItem()) {
             if (!menu.getCarried().isEmpty()) {
-                click(client, menu, input.index, 1, ContainerInput.PICKUP);
+                click(client, menu, input.index, bulkLapisInput ? 0 : 1, ContainerInput.PICKUP);
             } else if (ItemStack.isSameItemSameComponents(menu.getSlot(ingredientSource).getItem(), pickedIngredient)) {
                 pickIngredient(client, menu, ingredientSource);
             }
@@ -1633,7 +1880,7 @@ public final class BookCycle implements ClientModInitializer {
         if (returnIngredient(client, menu, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END)) return;
         var result = menu.getResultSlot().getItem();
         if (result.isEmpty()) return;
-        if (lapisBlockTier(input.getItem()) != craftTier || input.getItem().getCount() != 1) {
+        if (lapisBlockTier(input.getItem()) != craftTier || (!bulkLapisInput && input.getItem().getCount() != 1)) {
             stop("craft_result");
             return;
         }
@@ -1641,16 +1888,22 @@ public final class BookCycle implements ClientModInitializer {
                 ? result.is(Items.LAPIS_LAZULI) && result.getComponentsPatch().isEmpty()
                 : lapisBlockTier(result) == craftTier - 1;
         if (!expectedResult || result.getCount() != 9) return;
-        if (player.getInventory().getFreeSlot() < 0) {
-            stop("inventory_full");
+        int outputCount = input.getItem().getCount() * result.getCount();
+        if (lapisOutputSpace(menu, result) < outputCount) {
+            int lapis = countPlainItem(menu, Items.LAPIS_LAZULI, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END);
+            if (lapis >= TARGET_LAPIS) finishLapisCraft(client, lapis);
+            else {
+                closeMenu();
+                stop("inventory_full");
+            }
             return;
         }
-        expectedSupply = result.copy();
-        countBeforeCraft = countMatching(menu, expectedSupply, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END);
+        ItemStack output = result.copy();
+        int previous = countMatching(menu, output, InventoryMenu.INV_SLOT_START, InventoryMenu.USE_ROW_SLOT_END);
         click(client, menu, menu.getResultSlot().index, 0, ContainerInput.QUICK_MOVE,
-                () -> !input.hasItem() && countMatching(menu, expectedSupply, InventoryMenu.INV_SLOT_START,
-                        InventoryMenu.USE_ROW_SLOT_END) == countBeforeCraft + expectedSupply.getCount(),
-                () -> open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE));
+                () -> !input.hasItem() && countMatching(menu, output, InventoryMenu.INV_SLOT_START,
+                        InventoryMenu.USE_ROW_SLOT_END) == previous + outputCount,
+                () -> nextLapisIngredient(client, menu));
     }
 
     private boolean open(Minecraft client, Step next, BlockPos target, Block block) {
@@ -1784,7 +2037,7 @@ public final class BookCycle implements ClientModInitializer {
     private boolean processMenuAction(Minecraft client) {
         MenuAction action = menuAction;
         boolean inventorySwap = (step == Step.PREPARE_FOOD || step == Step.RESTORE_FOOD
-                || step == Step.PREPARE_XP_BOTTLE)
+                || step == Step.PREPARE_XP_BOTTLE || step == Step.PREPARE_CYCLE_ITEMS)
                 && client.gui.screen() == null && action.menu() == player.inventoryMenu;
         boolean matchingScreen = client.gui.screen() instanceof AbstractContainerScreen<?> screen
                 && screen.getMenu() == action.menu();
@@ -1936,7 +2189,7 @@ public final class BookCycle implements ClientModInitializer {
         actionDelay = 0;
         showControls = false;
         checkedBarrels.clear();
-        expectedSupply = ItemStack.EMPTY;
+        expectedLapisCount = -1;
         tableBook = ItemStack.EMPTY;
         aimedXpMob = null;
         aimedXpPoint = null;
@@ -1956,6 +2209,9 @@ public final class BookCycle implements ClientModInitializer {
         phaseStartTick = 0;
         currentPhaseTicks.clear();
         recentCycleTicks.clear();
+        cycleServer = null;
+        cycleItem = ItemStack.EMPTY;
+        initialDisenchant = false;
     }
 
     private void recordPhase(String newPhase) {
@@ -2008,12 +2264,16 @@ public final class BookCycle implements ClientModInitializer {
     }
 
     private void startNextCycle(Minecraft client) {
+        beginCycleTiming("OPEN_TABLE");
+        open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+    }
+
+    private void beginCycleTiming(String phase) {
         cycleStartTick = tickCounter;
         cycleStartNanos = System.nanoTime();
         currentPhaseTicks.clear();
         currentPhase = null;
-        recordPhase("OPEN_TABLE");
-        open(client, Step.OPEN_TABLE, table, Blocks.ENCHANTING_TABLE);
+        recordPhase(phase);
     }
 
     private static void message(LocalPlayer target, String key) {
