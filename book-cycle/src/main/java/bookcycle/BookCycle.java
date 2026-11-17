@@ -37,6 +37,7 @@ import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.monster.Guardian;
 import net.minecraft.world.entity.monster.Silverfish;
 import net.minecraft.world.entity.player.Inventory;
@@ -119,7 +120,7 @@ public final class BookCycle implements ClientModInitializer {
 
     private enum Step {
         OPEN_TABLE, ENCHANT, TAKE_ENCHANTED, OPEN_GRINDSTONE, GRIND,
-        OPEN_BARREL, TAKE_SUPPLIES, CRAFT_LAPIS, OPEN_CRAFTING_TABLE, CRAFT_LOOT, WAIT_FOR_XP, SWING,
+        OPEN_BARREL, TAKE_SUPPLIES, CRAFT_LAPIS, OPEN_CRAFTING_TABLE, CRAFT_LOOT, ARMOR_STAND, WAIT_FOR_XP, SWING,
         PREPARE_XP_BOTTLE, USE_XP_BOTTLE, PREPARE_FOOD, EAT, RESTORE_FOOD
     }
 
@@ -368,7 +369,9 @@ public final class BookCycle implements ClientModInitializer {
         }
         if (step != Step.WAIT_FOR_XP && step != Step.SWING && --ticksLeft == 0) {
             menuAction = null;
-            if (step == Step.OPEN_BARREL && client.gui.screen() == null) refillFromBarrel(client);
+            if (step == Step.ARMOR_STAND) {
+                finishArmorStandAttempt();
+            } else if (step == Step.OPEN_BARREL && client.gui.screen() == null) refillFromBarrel(client);
             else if (step == Step.CRAFT_LAPIS) {
                 if (activeMenu.getCarried().isEmpty()) closeMenu();
                 stop("craft_result");
@@ -416,6 +419,7 @@ public final class BookCycle implements ClientModInitializer {
             case CRAFT_LAPIS -> craftLapis(client, (InventoryMenu) activeMenu);
             case OPEN_CRAFTING_TABLE -> loadCraftingTable(client);
             case CRAFT_LOOT -> craftLoot(client, (CraftingMenu) activeMenu);
+            case ARMOR_STAND -> tickArmorStand(client);
             case WAIT_FOR_XP, SWING -> tickXpFarm(client);
             case PREPARE_XP_BOTTLE -> failXpBottle(client, "prepare state lost");
             case USE_XP_BOTTLE -> tickXpBottle(client);
@@ -1007,10 +1011,16 @@ public final class BookCycle implements ClientModInitializer {
         if (guardianMode) {
             xpNeeded = TARGET_LEVEL;
             xpBottleUsedThisWait = false;
-            recordPhase("WAIT_FOR_XP");
-            closeMenu();
-            step = Step.WAIT_FOR_XP;
             xpWaitTicks = 0;
+            if (completed % 2 == 0) {
+                // Attack a reachable armor stand once after every two completed cycles,
+                // before using XP bottles or attacking any XP-farm mobs.
+                recordPhase("ARMOR_STAND");
+                advance(Step.ARMOR_STAND);
+            } else {
+                recordPhase("WAIT_FOR_XP");
+                step = Step.WAIT_FOR_XP;
+            }
             return;
         }
         startNextCycle(client);
@@ -1032,6 +1042,47 @@ public final class BookCycle implements ClientModInitializer {
         closeMenu();
         step = Step.WAIT_FOR_XP;
         message(player, "waiting_xp");
+    }
+
+    private void tickArmorStand(Minecraft client) {
+        if (client.gui.screen() != null || player.containerMenu != player.inventoryMenu || !isSingleBook()) {
+            stop("stopped");
+            return;
+        }
+        if (!player.getMainHandItem().is(ItemTags.SWORDS)) {
+            int swordSlot = findHotbarSword();
+            if (swordSlot >= 0) {
+                player.getInventory().setSelectedSlot(swordSlot);
+                return;
+            }
+            stop("sword");
+            return;
+        }
+
+        Vec3 eye = player.getEyePosition();
+        var stands = client.level.getEntitiesOfClass(ArmorStand.class,
+                new AABB(eye, eye).inflate(player.entityInteractionRange()),
+                stand -> stand.isAlive() && stand.isAttackable() && stand.isPickable()
+                        && player.isWithinEntityInteractionRange(stand, 0));
+        stands.sort(Comparator.comparingDouble(stand -> stand.getBoundingBox().distanceToSqr(eye)));
+        for (ArmorStand stand : stands) {
+            Vec3 point = findVisibleAimPoint(client, stand);
+            if (point == null) continue;
+            if (!canSwing()) return;
+            player.lookAt(EntityAnchorArgument.Anchor.EYES, point);
+            client.gameMode.attack(player, stand);
+            player.swing(InteractionHand.MAIN_HAND, player.getMainHandItem().getAttackAnimation(), false);
+            actionDelay = afterAttackDelayTicks;
+            LOGGER.info("Book Cycle attacked an armor stand after cycle {}", completed);
+            break;
+        }
+        finishArmorStandAttempt();
+    }
+
+    private void finishArmorStandAttempt() {
+        recordPhase("WAIT_FOR_XP");
+        step = Step.WAIT_FOR_XP;
+        xpWaitTicks = 0;
     }
 
     private void tickXpFarm(Minecraft client) {
